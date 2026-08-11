@@ -1,0 +1,10 @@
+User-agent: *
+Allow: /
+Disallow: /admin
+Disallow: /minha-conta
+Disallow: /empresa-avaliadora
+Disallow: /avm-cliente-final
+Disallow: /reavaliacao-carteiras
+Disallow: /bancos
+
+Sitemap: https://valorytrue.com/sitemap.xml
