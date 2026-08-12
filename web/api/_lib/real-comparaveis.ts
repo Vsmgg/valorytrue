@@ -751,20 +751,28 @@ Para cada anúncio encontrado, escreva uma linha própria com o endereço EXATO 
 const SUFIXO_QUERY = '-aluguel -alugar'
 
 /** Extrai "rua + número" do endereço completo montado pelo chamador (formato
- * "Rua X, número, Bairro, Cidade - UF") — usado pra montar a query de busca (ver abaixo), NUNCA
- * pra geocodificação (que continua usando o endereço completo). Inclui o número junto (não só
- * o nome da rua) — confirmado via teste real que endereços em condomínios/prédios grandes têm
- * DEZENAS de unidades diferentes anunciadas sob o MESMO nome de rua (ex.: "59 Apartamentos à
- * venda na Avenida X, 2245" — um condomínio inteiro), então incluir o número junto ajuda a
- * Brave a priorizar anúncios daquele endereço específico em vez de qualquer imóvel da rua
- * inteira (que pode ter quilômetros de extensão). */
+ * "Rua X, número, Bairro, Cidade - UF") no formato "Rua X, número" — usado como referência pra
+ * preencher o endereço de um candidato de categoria que não menciona a própria rua (ver
+ * `ruaReferencia` em extrairCandidatosDeCategoria).
+ *
+ * BUG real encontrado e corrigido: esta função unia rua e número com um simples ESPAÇO (ex.
+ * "Avenida X 2245"), não vírgula. Quando esse texto é prepended a uma descrição sem vírgula
+ * nenhuma logo depois (comum: descrições de anúncio como "Apartamento à venda –..."),
+ * ENDERECO_BASE_RE (que só para de capturar a "rua" num desses caracteres: vírgula, quebra de
+ * linha, etc.) engolia o número JUNTO do resto do texto seguinte inteiro como se fosse tudo
+ * nome de rua — ex.: "endereco" saía como "Henrique Gonçalves Baptista 2245 Apartamento à
+ * venda –", sem o número separado em campo próprio. Confirmado via log real de produção: TODOS
+ * os candidatos vindos do JSON-LD do imovelweb.com.br falhavam a geocodificação por causa
+ * exatamente disso (Nominatim não reconhece esse texto como endereço válido). Unir com vírgula
+ * faz ENDERECO_BASE_RE parar exatamente depois do nome da rua, deixando NUMERO_PROXIMO_RE
+ * capturar o número corretamente como campo separado, do jeito que extrairEndereco espera. */
 function ruaDoEnderecoCompleto(enderecoCompleto: string): string {
   const partes = enderecoCompleto.split(',')
   return partes
     .slice(0, 2)
     .map((p) => p.trim())
     .filter(Boolean)
-    .join(' ')
+    .join(', ')
 }
 
 /** Segmento de URL que cada portal usa pra uma página de ANÚNCIO INDIVIDUAL (não uma página de
