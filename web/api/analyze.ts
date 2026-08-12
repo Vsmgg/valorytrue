@@ -3,6 +3,8 @@ import { getUserFromRequest } from './_lib/auth.js'
 import { recalcularResultadoNBR, sanitizarUrlsAmostras, type AmostraIA } from './_lib/nbr-recompute.js'
 import { nbrResponseSchema } from './_lib/nbr-schema.js'
 
+// Revertido — ver o motivo completo no config de analyze-verify.ts: trocar pra função Node.js
+// normal quebrou getUserFromRequest inteiro ("request.headers.get is not a function").
 export const config = { runtime: 'edge' }
 
 interface FileRef {
@@ -344,9 +346,7 @@ Gere a avaliação completa deste imóvel, seguindo a NBR 14.653.`
           responseSchema,
         },
       }),
-      // Rede de segurança: sem isso, estourar o tempo aqui é a Vercel matando a função com um
-      // erro genérico e não-recuperável (confirmado em produção acontecendo na chamada irmã de
-      // analyze-verify.ts), em vez de eu conseguir devolver um JSON de erro tratável.
+      // Revertido pra 23s — voltou a ser Edge Function (ver comentário no config acima).
       signal: AbortSignal.timeout(23_000),
     })
 

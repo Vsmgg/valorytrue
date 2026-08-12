@@ -3,6 +3,8 @@ import { nbrResponseSchema } from './_lib/nbr-schema.js'
 import { sanitizarUrlsAmostras, type AmostraIA } from './_lib/nbr-recompute.js'
 import type { ComparavelReal } from './_lib/real-comparaveis.js'
 
+// Revertido — ver o motivo completo no config de analyze-verify.ts: trocar pra função Node.js
+// normal quebrou getUserFromRequest inteiro ("request.headers.get is not a function").
 export const config = { runtime: 'edge' }
 
 interface PropertyData {
@@ -127,8 +129,7 @@ Gere o array "amostras" com uma entrada para cada um dos ${comparaveisReais.leng
           responseSchema,
         },
       }),
-      // Budget generoso (invocação dedicada, sem competir por tempo com o resto do laudo) mas
-      // com margem de 2s dentro do limite de 25s do Edge Function.
+      // Revertido pra 23s — voltou a ser Edge Function (ver comentário no config acima).
       signal: AbortSignal.timeout(23_000),
     })
 

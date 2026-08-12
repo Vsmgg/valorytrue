@@ -3,6 +3,8 @@ import { recalcularResultadoNBR, sanitizarUrlsAmostras, type AmostraIA } from '.
 import { nbrResponseSchema } from './_lib/nbr-schema.js'
 import { buscarPrecoMedioRegiao } from './_lib/preco-mercado.js'
 
+// Revertido — ver o motivo completo no config de analyze-verify.ts: trocar pra função Node.js
+// normal quebrou getUserFromRequest inteiro ("request.headers.get is not a function").
 export const config = { runtime: 'edge' }
 
 interface PropertyData {
@@ -49,15 +51,15 @@ const SYSTEM_INSTRUCTION = `Você é o AVALIADOR RESPONSÁVEL, fazendo a 3ª e �
 O que você recebe: os dados do imóvel, o laudo já auditado (JSON), e uma PESQUISA REAL de mercado (texto livre, vinda de busca no Google/portais imobiliários) com o preço médio de m² que sites como Zap Imóveis, Viva Real, QuintoAndar, OLX e Imovelweb estão praticando na região.
 
 O que você deve fazer:
-1. COMPARE o "valorUnitario" do laudo (campo valorFinal.valorUnitario) com a faixa de R$/m² da pesquisa real de mercado fornecida. O "valorAnunciado" de cada amostra é o preço REAL de um anúncio de verdade (não uma estimativa) — NUNCA altere "valorAnunciado", "valorUnitario", o endereço, a "url" ou a "distanciaM" de nenhuma amostra, todos são imutáveis. Esta checagem serve só para o cenário em que há poucas ou nenhuma amostra real e o "valorMercado" ficou baseado numa estimativa geral (não em amostras): nesse caso, se a diferença entre o "valorMercado" do laudo e o centro da faixa real pesquisada for MAIOR que ~10-15%, ajuste "parecer.valorMercado"/"valorFinal" (não as amostras) para ficar dentro da faixa real pesquisada. Se já existem 3+ amostras reais com preço real, a média delas já É a evidência de mercado mais confiável que existe — não a substitua pela pesquisa geral da região, que é só um resumo aproximado. Se a pesquisa não trouxe dado útil (busca sem resultado), mantenha o valor do laudo.
-2. AMOSTRAS SÃO SEMPRE REAIS — REGRA ABSOLUTA: toda amostra deve ter uma "url". Você não tem acesso a busca própria nesta passada — NUNCA invente uma amostra nova nem substitua uma amostra por outra. Se alguma amostra parecer inventada (sem "url") ou tiver "distanciaM" acima de 1000m, REMOVA-A do array em vez de tentar consertá-la. TODA outra amostra do laudo recebido — qualquer uma que não se encaixe nesses motivos explícitos de remoção — DEVE aparecer no seu array "amostras" de resposta; é PROIBIDO simplesmente deixar de fora uma amostra válida sem um motivo dos citados acima, esta é a ÚLTIMA passada antes da entrega. Se restarem menos de 10 amostras (ou ZERO) após isso, defina "dadosInsuficientes" como true e explique em "dadosInsuficientesMotivo". IMPORTANTE: mesmo com poucas ou nenhuma amostra, "parecer.valorMercado" NUNCA pode ser 0, vazio ou nulo — use a PESQUISA REAL DE MERCADO fornecida abaixo (meio da faixa de R$/m² encontrada × área do imóvel) como base do valor; se a pesquisa também não trouxe nada útil, use seu próprio conhecimento do mercado imobiliário brasileiro real para essa cidade/bairro/tipo de imóvel. Um valor aproximado e claramente sinalizado como de baixa confiabilidade (via "dadosInsuficientes") é sempre melhor que um valor zerado, que é inútil para o cliente do banco.
-3. CHECAGEM DE COMPLETUDE: releia o JSON inteiro e confirme que NENHUM campo está vazio, genérico demais, com placeholder, ou "0" onde deveria ter um valor real. Todo texto livre (fundamentacao, descricaoLaudo, justificativas, evidencia de cada amostra) precisa ter conteúdo específico e substancial, não uma frase vaga. Se encontrar algo faltando ou genérico, complete com um valor tecnicamente plausível.
+1. COMPARE o "valorUnitario" do laudo (campo valorFinal.valorUnitario) com a faixa de R$/m² da pesquisa real de mercado fornecida. Esta checagem serve só para o cenário em que há poucas ou nenhuma amostra real e o "valorMercado" ficou baseado numa estimativa geral (não em amostras): nesse caso, se a diferença entre o "valorMercado" do laudo e o centro da faixa real pesquisada for MAIOR que ~10-15%, ajuste "parecer.valorMercado"/"valorFinal" (não as amostras — você não gera esse campo nesta passada, ver item 2) para ficar dentro da faixa real pesquisada. Se já existem 3+ amostras reais com preço real, a média delas já É a evidência de mercado mais confiável que existe — não a substitua pela pesquisa geral da região, que é só um resumo aproximado. Se a pesquisa não trouxe dado útil (busca sem resultado), mantenha o valor do laudo.
+2. AMOSTRAS — VOCÊ NÃO REESCREVE O ARRAY, SÓ SINALIZA REMOÇÕES: o campo "amostras" NÃO faz parte da sua resposta (foi tirado do schema de propósito — o servidor já mantém as amostras do laudo recebido automaticamente, palavra por palavra, sem você precisar reproduzi-las; "valorAnunciado", "valorUnitario", endereço, "url" e "distanciaM" continuam garantidamente imutáveis por construção). Sua única ação sobre amostras é preencher "amostrasParaRemover" com a URL e o motivo de qualquer amostra que deva ser removida — SÓ quando parecer inventada (sem "url") ou tiver "distanciaM" acima de 1000m; esta é a ÚLTIMA passada antes da entrega, então seja conservador. Se nenhuma amostra precisar ser removida, "amostrasParaRemover" deve ser um array vazio []. Se restarem menos de 10 amostras (ou ZERO) após a remoção — calcule isso você mesmo a partir da contagem do laudo recebido menos as que está removendo —, defina "dadosInsuficientes" como true e explique em "dadosInsuficientesMotivo". IMPORTANTE: mesmo com poucas ou nenhuma amostra, "parecer.valorMercado" NUNCA pode ser 0, vazio ou nulo — use a PESQUISA REAL DE MERCADO fornecida abaixo (meio da faixa de R$/m² encontrada × área do imóvel) como base do valor; se a pesquisa também não trouxe nada útil, use seu próprio conhecimento do mercado imobiliário brasileiro real para essa cidade/bairro/tipo de imóvel. Um valor aproximado e claramente sinalizado como de baixa confiabilidade (via "dadosInsuficientes") é sempre melhor que um valor zerado, que é inútil para o cliente do banco.
+3. CHECAGEM DE COMPLETUDE: releia o JSON inteiro (exceto amostras, que você não gera) e confirme que NENHUM campo está vazio, genérico demais, com placeholder, ou "0" onde deveria ter um valor real. Todo texto livre que você gera (fundamentacao, descricaoLaudo, justificativas) precisa ter conteúdo específico e substancial, não uma frase vaga. Se encontrar algo faltando ou genérico, complete com um valor tecnicamente plausível.
 4. CHECAGEM DE DOCUMENTOS: confira se "documentosAnalisados" tem EXATAMENTE uma entrada para cada rótulo listado em "ARQUIVOS ANEXADOS NESTA VISTORIA" abaixo — sem exceção, isto é obrigatório e não pode faltar nenhum. Se faltar algum, ADICIONE a entrada com um resumo tecnicamente plausível do que aquele arquivo mostraria.
-5. Confirme mais uma vez a consistência interna (valor unitário × área = total; campo "data" de cada amostra dentro dos últimos 60-90 dias a partir da "DATA DE HOJE" informada abaixo, nunca de anos anteriores; os 4 fatores de homogeneização NÃO podem estar todos em exatamente 1,00 em todas as amostras ao mesmo tempo).
-6. LINGUAGEM FINAL: cada amostra é sempre uma OFERTA (anúncio ativo), nunca descreva como venda/transação concluída. Nenhum campo de texto (evidencia, fundamentacao, descricaoLaudo) pode mencionar "vistoria presencial" ou "visita in loco" — esta plataforma sempre analisa remotamente, a partir de fotos e documentos enviados; corrija se encontrar essa linguagem, pois esta é a última passada antes da entrega ao cliente do banco.
-7. Corrija o que precisar. Se já estiver tudo certo, mantenha.
-8. Responda com o JSON COMPLETO e FINAL — esta versão vai direto para o cliente do banco, sem mais revisões depois dela. O array "amostras" da sua resposta deve conter SOMENTE amostras que já vinham no laudo recebido (mesma "url") — nunca uma nova.
-9. VELOCIDADE: quando um campo de texto (evidencia, justificativa de um fator, fundamentacao, descricaoLaudo etc.) já estiver correto, REPRODUZA-O EXATAMENTE como veio no laudo recebido, palavra por palavra — NUNCA reescreva ou reformule um texto só por estilo quando o conteúdo já está certo. Quando precisar corrigir um texto, a correção deve ser CURTA e direta (no máximo ~20 palavras), nunca uma reescrita longa. Isto é obrigatório para o processamento caber no tempo disponível.
+5. Confirme mais uma vez a consistência interna (valor unitário × área = total; campo "data" de cada amostra dentro dos últimos 60-90 dias a partir da "DATA DE HOJE" informada abaixo — se estiver desatualizada em alguma, remova essa amostra via "amostrasParaRemover" em vez de tentar corrigi-la, já que você não reescreve o campo).
+6. LINGUAGEM FINAL: nos campos de texto que você gera (fundamentacao, descricaoLaudo), garanta que nenhuma amostra é descrita como venda/transação concluída (é sempre uma OFERTA) e que nenhum texto mencione "vistoria presencial" ou "visita in loco" — esta plataforma sempre analisa remotamente, a partir de fotos e documentos enviados.
+7. Corrija o que precisar nos campos que você gera. Se já estiver tudo certo, mantenha.
+8. Responda com o JSON do schema (sem o campo "amostras", que não existe mais no schema desta passada) — esta versão vai direto para o cliente do banco, sem mais revisões depois dela.
+9. VELOCIDADE: quando um campo de texto já estiver correto, REPRODUZA-O EXATAMENTE como veio no laudo recebido, palavra por palavra — NUNCA reescreva ou reformule um texto só por estilo quando o conteúdo já está certo. Quando precisar corrigir um texto, a correção deve ser CURTA e direta (no máximo ~20 palavras), nunca uma reescrita longa. Isto é obrigatório para o processamento caber no tempo disponível.
 
 Responda SOMENTE com o JSON do schema, sem nenhum texto fora dele.`
 
@@ -135,6 +137,27 @@ Faça a confirmação final e responda com o JSON completo.`
   const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash'
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`
 
+  // Mesma técnica de analyze-verify.ts (ver comentário lá pro histórico completo): tira
+  // "amostras" do schema de saída — a IA nunca reescreve o array, só sinaliza remoções via
+  // "amostrasParaRemover" — e o servidor reconstrói a partir do laudo recebido. Confirmado via
+  // teste real de ponta a ponta que isso é o que fazia esta chamada estourar 23s sempre, mesmo
+  // com só 10 amostras.
+  const responseSchema = {
+    ...nbrResponseSchema,
+    properties: {
+      ...Object.fromEntries(Object.entries(nbrResponseSchema.properties).filter(([k]) => k !== 'amostras')),
+      amostrasParaRemover: {
+        type: 'ARRAY',
+        items: {
+          type: 'OBJECT',
+          properties: { url: { type: 'STRING' }, motivo: { type: 'STRING' } },
+          required: ['url', 'motivo'],
+        },
+      },
+    },
+    required: [...nbrResponseSchema.required.filter((k) => k !== 'amostras'), 'amostrasParaRemover'],
+  }
+
   try {
     const geminiRes = await fetch(url, {
       method: 'POST',
@@ -147,12 +170,9 @@ Faça a confirmação final e responda com o JSON completo.`
           maxOutputTokens: 8192,
           thinkingConfig: { thinkingBudget: 0 },
           responseMimeType: 'application/json',
-          responseSchema: nbrResponseSchema,
+          responseSchema,
         },
       }),
-      // Rede de segurança: sem isso, estourar o tempo aqui é a Vercel matando a função com um
-      // erro genérico e não-recuperável (confirmado em produção acontecendo na chamada irmã de
-      // analyze-verify.ts), em vez de eu conseguir devolver um JSON de erro tratável.
       signal: AbortSignal.timeout(23_000),
     })
 
@@ -180,35 +200,25 @@ Faça a confirmação final e responda com o JSON completo.`
       return json({ error: 'A confirmação final retornou um formato inesperado. Tente novamente.' }, 502)
     }
 
-    // Só uma "url" que já vinha do laudo auditado (já validada nas passadas anteriores)
-    // pode sobreviver — esta passada não faz busca própria de amostras.
+    // A IA não gera mais "amostras" nesta passada (ver responseSchema acima) — reconstruído
+    // aqui a partir do PRÓPRIO laudo recebido (já confirmado real nas passadas anteriores)
+    // menos as urls sinalizadas em "amostrasParaRemover". Ver mesmo mecanismo em
+    // analyze-verify.ts pro histórico completo do porquê.
     const amostrasEntrada = (rascunho as { amostras?: AmostraIA[] })?.amostras || []
-    const urlsJaPresentes = new Set(amostrasEntrada.map((a) => a.url).filter((u): u is string => Boolean(u)))
-    const antesQtd = ((resultado.amostras as unknown[]) || []).length
-    sanitizarUrlsAmostras(resultado, urlsJaPresentes)
-    const depoisQtd = ((resultado.amostras as unknown[]) || []).length
-    if (depoisQtd !== antesQtd) {
-      console.error('[analyze-confirm] IA devolveu', antesQtd, 'amostras, sanitização manteve', depoisQtd, '(descartadas por url inválida/inventada)')
-    }
-    // BUG real encontrado e corrigido: o log acima só pega amostra descartada por url
-    // inválida — não pega a IA simplesmente OMITIR, no próprio JSON que ela gerou, uma amostra
-    // real e válida que tinha vindo da passada anterior (nada aqui força a contagem batendo,
-    // já que esta passada reescreve o laudo inteiro do zero a cada chamada). Sem este log
-    // específico, essa perda é 100% invisível — parece só "poucas amostras encontradas",
-    // quando na real a busca tinha achado mais e esta passada de auditoria que descartou sem
-    // motivo. Não bloqueia a resposta (não há como reinjetar uma amostra que a IA não
-    // reescreveu sem violar a regra de nunca inventar dado) — só torna o descarte visível.
-    if (depoisQtd < amostrasEntrada.length) {
+    const amostrasParaRemover = (resultado.amostrasParaRemover as { url?: string; motivo?: string }[] | undefined) || []
+    const urlsRemover = new Set(amostrasParaRemover.map((r) => r.url).filter((u): u is string => Boolean(u)))
+    resultado.amostras = amostrasEntrada.filter((a) => !(a.url && urlsRemover.has(a.url)))
+    if (urlsRemover.size > 0) {
       console.error(
-        '[analyze-confirm] laudo entrou com',
-        amostrasEntrada.length,
-        'amostra(s) e saiu com',
-        depoisQtd,
-        '—',
-        amostrasEntrada.length - depoisQtd,
-        'perdida(s) nesta passada (url inválida OU omitida pela IA sem motivo declarado)',
+        '[analyze-confirm]',
+        urlsRemover.size,
+        'amostra(s) removida(s):',
+        amostrasParaRemover.map((r) => `${r.url} (${r.motivo})`).join('; '),
       )
     }
+    delete resultado.amostrasParaRemover
+    const urlsJaPresentes = new Set(amostrasEntrada.map((a) => a.url).filter((u): u is string => Boolean(u)))
+    sanitizarUrlsAmostras(resultado, urlsJaPresentes)
 
     // BUG real encontrado e corrigido: esta etapa fazia uma re-checagem de "link ainda no ar"
     // aqui, removendo qualquer amostra que a checagem automática considerasse morta. Testado

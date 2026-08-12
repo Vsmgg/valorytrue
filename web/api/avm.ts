@@ -1,6 +1,8 @@
 import { buscarComparaveisReais, type ComparavelReal } from './_lib/real-comparaveis'
 import { getUserFromRequest, incrementEvaluationUsage } from './_lib/auth'
 
+// Revertido — ver o motivo completo no config de analyze-verify.ts: trocar pra função Node.js
+// normal quebrou getUserFromRequest inteiro ("request.headers.get is not a function").
 export const config = { runtime: 'edge' }
 
 interface FileRef {
@@ -292,9 +294,7 @@ Gere a estimativa de valor (AVM) deste imóvel.`
           responseSchema,
         },
       }),
-      // Rede de segurança: sem isso, estourar o tempo aqui é a Vercel matando a função com um
-      // erro genérico e não-recuperável (confirmado em produção acontecendo em analyze-verify.ts,
-      // o equivalente deste módulo no Empresa Avaliadora), em vez de eu devolver um erro tratável.
+      // Revertido pra 23s — voltou a ser Edge Function (ver comentário no config acima).
       signal: AbortSignal.timeout(23_000),
     })
 

@@ -1,6 +1,8 @@
 import { getUserFromRequest } from './_lib/auth.js'
 import type { AmostraIA } from './_lib/nbr-recompute.js'
 
+// Revertido — ver o motivo completo no config de analyze-verify.ts: trocar pra função Node.js
+// normal quebrou getUserFromRequest inteiro ("request.headers.get is not a function").
 export const config = { runtime: 'edge' }
 
 interface PropertyData {
@@ -330,6 +332,7 @@ export default async function handler(request: Request) {
           thinkingConfig: { thinkingBudget: 0 },
         },
       }),
+      // Revertido pra 23s — voltou a ser Edge Function (ver comentário no config acima).
       signal: AbortSignal.timeout(23_000),
     })
 
