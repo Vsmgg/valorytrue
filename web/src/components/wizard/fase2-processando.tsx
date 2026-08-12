@@ -214,13 +214,48 @@ export function Fase2Processando({ input, onComplete }: Fase2Props) {
 
         setFase('geracao')
 
-        const res1 = await fetch('/api/analyze', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ ...input, comparaveisReais, amostrasProntas: amostrasProntasFinal }),
-        })
-        const data1 = (await res1.json().catch(() => ({}))) as { resultado?: AvaliacaoResultado; error?: string }
-        if (!res1.ok || !data1.resultado) {
+        // BUG real encontrado e corrigido: chamadas de IA de ponta a ponta (geração + 2
+        // verificações) têm latência natural do próprio Gemini que varia de chamada pra
+        // chamada — confirmado via teste real: a MESMA etapa (analyze-verify) estourou o tempo
+        // do servidor numa tentativa e, minutos depois com o MESMO endereço, funcionou normal.
+        // Um "Recomeçar" manual do usuário já resolvia (a nova tentativa geralmente passa), mas
+        // isso não pode depender do usuário perceber e clicar de novo — pedido explícito:
+        // "estes erros não podem acontecer". Cada uma das 3 etapas agora tenta uma 2ª vez,
+        // sozinha, antes de mostrar qualquer erro pro usuário.
+        const MAX_TENTATIVAS_ETAPA = 2
+        async function chamarComRetry(
+          url: string,
+          body: unknown,
+          rotulo: string,
+        ): Promise<{ resultado?: AvaliacaoResultado; error?: string }> {
+          let ultimoErro = 'Falha desconhecida.'
+          for (let tentativa = 1; tentativa <= MAX_TENTATIVAS_ETAPA; tentativa++) {
+            try {
+              const res = await fetch(url, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify(body),
+              })
+              const data = (await res.json().catch(() => ({}))) as { resultado?: AvaliacaoResultado; error?: string }
+              if (res.ok && data.resultado) return data
+              ultimoErro = data.error || `Falha em ${rotulo}.`
+            } catch {
+              ultimoErro = 'Não foi possível conectar ao motor de análise.'
+            }
+            if (tentativa < MAX_TENTATIVAS_ETAPA) {
+              console.error(`[fase2] ${rotulo} falhou (tentativa ${tentativa}):`, ultimoErro, '— tentando de novo')
+            }
+          }
+          console.error(`[fase2] ${rotulo} falhou após ${MAX_TENTATIVAS_ETAPA} tentativas:`, ultimoErro)
+          return { error: ultimoErro }
+        }
+
+        const data1 = await chamarComRetry(
+          '/api/analyze',
+          { ...input, comparaveisReais, amostrasProntas: amostrasProntasFinal },
+          'geração da análise',
+        )
+        if (!data1.resultado) {
           setError(data1.error || 'Falha ao gerar a análise. Tente novamente.')
           return
         }
@@ -229,36 +264,24 @@ export function Fase2Processando({ input, onComplete }: Fase2Props) {
 
         setFase('verificacao')
 
-        const res2 = await fetch('/api/analyze-verify', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            propertyData: input.propertyData,
-            resultado: data1.resultado,
-            temFotos: input.photos.length > 0,
-            documentLabels,
-          }),
-        })
-        const data2 = (await res2.json().catch(() => ({}))) as { resultado?: AvaliacaoResultado; error?: string }
-        if (!res2.ok || !data2.resultado) {
+        const data2 = await chamarComRetry(
+          '/api/analyze-verify',
+          { propertyData: input.propertyData, resultado: data1.resultado, temFotos: input.photos.length > 0, documentLabels },
+          'segunda verificação técnica',
+        )
+        if (!data2.resultado) {
           setError(data2.error || 'Falha na segunda verificação técnica. Tente novamente.')
           return
         }
 
         setFase('confirmacao')
 
-        const res3 = await fetch('/api/analyze-confirm', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            propertyData: input.propertyData,
-            resultado: data2.resultado,
-            temFotos: input.photos.length > 0,
-            documentLabels,
-          }),
-        })
-        const data3 = (await res3.json().catch(() => ({}))) as { resultado?: AvaliacaoResultado; error?: string }
-        if (!res3.ok || !data3.resultado) {
+        const data3 = await chamarComRetry(
+          '/api/analyze-confirm',
+          { propertyData: input.propertyData, resultado: data2.resultado, temFotos: input.photos.length > 0, documentLabels },
+          'confirmação final',
+        )
+        if (!data3.resultado) {
           setError(data3.error || 'Falha na confirmação final. Tente novamente.')
           return
         }

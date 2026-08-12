@@ -91,13 +91,28 @@ export function AvmClienteFinal() {
       }
       setBuscando(false)
 
-      const res = await fetch('/api/avm', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ ...form, comparaveisReais }),
-      })
-      const data = (await res.json().catch(() => ({}))) as { resultado?: AvmResultadoData; error?: string }
-      if (!res.ok || !data.resultado) {
+      // Mesmo fix aplicado em fase2-processando.tsx: a latência da chamada à IA varia entre
+      // tentativas (confirmado via teste real que a mesma etapa, em outro módulo, estourou o
+      // tempo numa vez e funcionou normal minutos depois) — tenta uma 2ª vez sozinho antes de
+      // mostrar erro, em vez de depender do usuário clicar em "tentar novamente".
+      const MAX_TENTATIVAS_AVM = 2
+      let data: { resultado?: AvmResultadoData; error?: string } = {}
+      for (let tentativa = 1; tentativa <= MAX_TENTATIVAS_AVM; tentativa++) {
+        try {
+          const res = await fetch('/api/avm', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ ...form, comparaveisReais }),
+          })
+          data = (await res.json().catch(() => ({}))) as { resultado?: AvmResultadoData; error?: string }
+          if (res.ok && data.resultado) break
+          if (tentativa < MAX_TENTATIVAS_AVM) console.error('[avm] falhou (tentativa', tentativa, '):', data.error, '— tentando de novo')
+        } catch {
+          data = { error: 'Não foi possível conectar ao motor de análise.' }
+          if (tentativa < MAX_TENTATIVAS_AVM) console.error('[avm] erro de rede (tentativa', tentativa, ') — tentando de novo')
+        }
+      }
+      if (!data.resultado) {
         setError(data.error || 'Falha ao estimar o valor. Tente novamente.')
         return
       }
