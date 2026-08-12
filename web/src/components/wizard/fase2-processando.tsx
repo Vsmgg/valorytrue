@@ -24,6 +24,7 @@ interface ComparavelReal {
   distanciaM: number | null
   url: string
   tipoDetectado: string | null
+  precisaoEndereco: 'exato' | 'condominio' | 'bairro'
 }
 
 const STEPS_BUSCA = [

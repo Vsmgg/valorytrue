@@ -15,6 +15,12 @@ export interface ComparavelReal {
    * não viram amostra por serem de tipo incompatível com o avaliando) — nunca usado como filtro
    * de aceitação/rejeição do candidato em si. */
   tipoDetectado: string | null
+  /** 'exato' (rua+número real) | 'condominio' (nome do condomínio real) | 'bairro' (nem rua nem
+   * condomínio identificados no texto — usa o bairro como ponto aproximado). Quando não-'exato',
+   * "distanciaM" é uma ESTIMATIVA, não um cálculo exato — consumidores (prompt de geração de
+   * amostras, laudo narrativo) devem refletir isso na linguagem (DADO ESTIMADO), nunca afirmar
+   * como distância exata calculada. Ver extrairEnderecoComPrecisao. */
+  precisaoEndereco: PrecisaoEndereco
 }
 
 interface BuscarParams {
@@ -92,6 +98,15 @@ const ENDERECO_BASE_RE = /(?:Rua|Avenida|Av\.|Alameda|Travessa|Estrada|Rodovia)[
 // rejeitava candidatos que na verdade estavam pertinho. Nunca cruza um "R$"/"m²" no meio (evita
 // capturar o preço ou a área por engano).
 const NUMERO_PROXIMO_RE = /^(?:(?!R\$|m²)[^\d]){0,20}?(\d{1,6})[A-Za-z]?\b/
+// Pedido explícito do usuário: "tem que funcionar para casas também" — em bairros de
+// condomínio fechado (comuns em casas/sobrados, ex. Granja Viana), a MAIORIA dos anúncios reais
+// nunca cita uma rua no texto (o portal só mostra o nome do condomínio + bairro, sem endereço
+// exato — prática comum de privacidade do vendedor/corretor). Exigir "Rua/Avenida X" descartava
+// esses anúncios reais em massa, mesmo quando o nome do condomínio (um identificador real e
+// geocodificável) estava bem ali no texto. Confirmado via teste manual: só 2 de 30 anúncios
+// reais de sobrados na Granja Viana citavam uma rua, mas praticamente todos citavam o
+// condomínio.
+const CONDOMINIO_RE = /(?:Condom[ií]nio|Cond\.)\s+([A-ZÀ-Ú][^,\n*|<>·•\-.:]{2,45})/
 // O símbolo "²" às vezes some do texto (confirmado via teste real: um bloco JSON-LD de SEO do
 // imovelweb.com.br trazia "Área Privativa de 59 m," sem o "²") — aceita "m" sozinho como
 // fallback, desde que seguido de fronteira de palavra (evita casar o "m" no meio de outra
@@ -134,6 +149,34 @@ function extrairEndereco(text: string): string | null {
   if (numeroMatch) endereco += `, ${numeroMatch[1]}`
   endereco = endereco.trim().replace(/[,\s]+$/, '')
   return endereco || null
+}
+
+/** Nível de precisão da localização de uma amostra — usado pra nunca afirmar uma distância
+ * exata quando na verdade só temos uma localização aproximada (pedido explícito do usuário:
+ * aceitar bairro como último recurso, mas "marcar isso claramente pro laudo não afirmar uma
+ * distância falsamente exata"). 'exato' = rua+número real, geocodificado direto. 'condominio' =
+ * nome do condomínio real, geocodificado com o bairro/cidade pra desambiguar. 'bairro' = nem rua
+ * nem condomínio identificados no texto — usa o centro do bairro (que já sabemos ser onde o
+ * anúncio está, é o escopo da própria busca) como ponto aproximado; a distância vira uma
+ * ESTIMATIVA, não um cálculo exato. */
+type PrecisaoEndereco = 'exato' | 'condominio' | 'bairro'
+
+/** Extrai o endereço em 3 níveis de precisão, na ordem pedida pelo usuário: rua+número exato
+ * primeiro, nome do condomínio como 2º recurso, bairro como último recurso — nunca descarta um
+ * anúncio real só por não citar uma rua (comum em casas/sobrados de condomínio fechado, ver
+ * CONDOMINIO_RE). `bairro` vem do PRÓPRIO escopo da busca (é o bairro que estamos pesquisando),
+ * não é extraído do texto — por isso o nível 'bairro' está sempre disponível como último
+ * recurso, nunca null. */
+function extrairEnderecoComPrecisao(text: string, bairro: string): { endereco: string; precisao: PrecisaoEndereco } | null {
+  const exato = extrairEndereco(text)
+  if (exato) return { endereco: exato, precisao: 'exato' }
+  const condoMatch = text.match(CONDOMINIO_RE)
+  if (condoMatch) {
+    const nome = condoMatch[1].trim().replace(/[,\s]+$/, '')
+    if (nome) return { endereco: `Condomínio ${nome}`, precisao: 'condominio' }
+  }
+  if (bairro.trim()) return { endereco: bairro.trim(), precisao: 'bairro' }
+  return null
 }
 /** Extrai o número final de um endereço "rua, número" (mesmo formato produzido por
  * extrairEndereco) — usado só pra comparar com o número do avaliando (priorização) e pra
@@ -239,6 +282,7 @@ interface CandidatoBruto {
   valorAnunciado: number | null
   url: string
   tipoDetectado: string | null
+  precisaoEndereco: PrecisaoEndereco
 }
 
 /** Normaliza "rua, número" pra comparação: sem acento, minúsculo, sem prefixo de logradouro
@@ -376,7 +420,7 @@ function detectarTipo(textoBruto: string, url: string): string | null {
   return null
 }
 
-function extrairCandidato(textoBruto: string, url: string | undefined): CandidatoBruto | null {
+function extrairCandidato(textoBruto: string, url: string | undefined, bairro: string): CandidatoBruto | null {
   if (!url) return null
   if (!urlPertenceAPortalConhecido(url)) return null
   if (PAGINA_INSTITUCIONAL_RE.test(url)) return null
@@ -407,10 +451,17 @@ function extrairCandidato(textoBruto: string, url: string | undefined): Candidat
     const precoM2 = valorAnunciado / areaM2
     if (precoM2 < 800 || precoM2 > 60_000) return null
   }
-  const endereco = extrairEndereco(text)
-  if (!endereco) return null
+  const enderecoInfo = extrairEnderecoComPrecisao(text, bairro)
+  if (!enderecoInfo) return null
 
-  return { endereco, areaM2, valorAnunciado, url, tipoDetectado: detectarTipo(text, url) }
+  return {
+    endereco: enderecoInfo.endereco,
+    precisaoEndereco: enderecoInfo.precisao,
+    areaM2,
+    valorAnunciado,
+    url,
+    tipoDetectado: detectarTipo(text, url),
+  }
 }
 
 /**
@@ -537,7 +588,7 @@ async function resolverRedirecionamentoGemini(url: string): Promise<string> {
   }
 }
 
-async function buscarCandidatos(prompt: string, max: number, fetchTimeoutMs: number): Promise<ResultadoBuscaPortal> {
+async function buscarCandidatos(prompt: string, max: number, fetchTimeoutMs: number, bairro: string): Promise<ResultadoBuscaPortal> {
   const apiKey = process.env.GEMINI_API_KEY
   if (!apiKey) return { candidatos: [], categorias: [] }
 
@@ -596,7 +647,7 @@ async function buscarCandidatos(prompt: string, max: number, fetchTimeoutMs: num
       // categoria/listagem em vez de um anúncio individual — em vez de só descartar, guarda a
       // URL à parte pra ser buscada direto depois (ver extrairCandidatosDeCategoria).
       if (chunkUrl && ehPaginaDeCategoria(chunkUrl) && !categorias.includes(chunkUrl)) categorias.push(chunkUrl)
-      const candidato = extrairCandidato(text, chunkUrl)
+      const candidato = extrairCandidato(text, chunkUrl, bairro)
       if (!candidato || seenUrls.has(candidato.url)) continue
       seenUrls.add(candidato.url)
       results.push(candidato)
@@ -647,12 +698,26 @@ export async function urlEstaViva(url: string): Promise<boolean> {
   }
 }
 
+/** Monta a string de busca do geocodificador — varia pelo nível de precisão do endereço (ver
+ * PrecisaoEndereco). 'exato' já tem rua+número, só precisa de cidade/uf pra desambiguar. Já
+ * 'condominio' e 'bairro' são nomes mais genéricos (nome de condomínio pode repetir em outra
+ * cidade; o próprio bairro sozinho é ambíguo sem cidade) — inclui o bairro explicitamente pra
+ * ajudar o geocodificador a achar o ponto certo. Quando a precisão já É 'bairro', o campo
+ * "endereco" do candidato já é literalmente o nome do bairro (ver extrairEnderecoComPrecisao),
+ * então não duplica. */
+function montarQueryGeocode(candidato: CandidatoBruto, cidade: string, uf: string, bairro: string): string {
+  if (candidato.precisaoEndereco === 'exato') return `${candidato.endereco}, ${cidade} - ${uf}`
+  if (candidato.precisaoEndereco === 'bairro') return `${bairro}, ${cidade} - ${uf}`
+  return `${candidato.endereco}, ${bairro}, ${cidade} - ${uf}`
+}
+
 async function geocodarEFiltrar(
   candidatos: CandidatoBruto[],
   origem: Coordenadas,
   raioM: number | null,
   cidade: string,
   uf: string,
+  bairro: string,
   prazoMs: number,
 ): Promise<{ aprovados: ComparavelReal[]; processadosUrls: string[] }> {
   // BUG real encontrado e corrigido: geocodificava TODOS os candidatos novos de uma rodada em
@@ -696,17 +761,26 @@ async function geocodarEFiltrar(
       console.error('[real-comparaveis] geocodificação interrompida por prazo —', candidatos.length - resultados.length, 'candidato(s) não verificado(s) nesta rodada')
       break
     }
-    // A cidade/UF são anexadas aqui (o endereço do candidato sozinho não as tem, ao contrário
-    // do endereço do imóvel avaliando) — sem isso, nomes de rua comuns podem geocodificar para
-    // a cidade errada, ou simplesmente não resolver.
+    // A cidade/UF (e o bairro, quando a precisão não é 'exato' — ver montarQueryGeocode) são
+    // anexados aqui (o endereço do candidato sozinho não os tem, ao contrário do endereço do
+    // imóvel avaliando) — sem isso, nomes de rua/condomínio comuns podem geocodificar para a
+    // cidade errada, ou simplesmente não resolver.
     processadosUrls.push(candidato.url)
-    const coords = await geocodeEndereco(`${candidato.endereco}, ${cidade} - ${uf}`)
+    const coords = await geocodeEndereco(montarQueryGeocode(candidato, cidade, uf, bairro))
     if (!coords) {
       console.error('[real-comparaveis] candidato descartado (geocode falhou):', candidato.endereco)
       resultados.push(null)
     } else {
       const distanciaM = haversineMeters(origem, coords)
-      if (raioM !== null && distanciaM > raioM) {
+      // O filtro de raio não se aplica ao nível 'bairro' — a distância aí é até o CENTRO do
+      // bairro (geocodificado por falta de rua/condomínio identificável no anúncio), não até o
+      // imóvel de verdade, então pode por acaso computar além do raio mesmo sendo
+      // comprovadamente do mesmo bairro do avaliando (ex.: avaliando numa ponta do bairro,
+      // centroide do bairro na outra). O próprio fato de já estarmos pesquisando ESSE bairro
+      // específico (é ele que geramos a query com) já é o critério de proximidade pra este
+      // nível — descartar por raio aqui rejeitaria candidatos reais e válidos por um artefato
+      // de cálculo, não por estarem genuinamente longe.
+      if (raioM !== null && distanciaM > raioM && candidato.precisaoEndereco !== 'bairro') {
         console.error('[real-comparaveis] candidato descartado (fora do raio):', candidato.endereco, '-', Math.round(distanciaM), 'm')
         resultados.push(null)
       } else {
@@ -878,7 +952,7 @@ function extrairListingsJsonLd(html: string): ListingJsonLd[] {
  * regras de qualidade do resto do pipeline (extrairCandidato) — nunca aceita um candidato sem
  * preço real extraído do próprio texto.
  */
-async function extrairCandidatosDeCategoria(urlCategoria: string, site: string, ruaReferencia: string): Promise<CandidatoBruto[]> {
+async function extrairCandidatosDeCategoria(urlCategoria: string, site: string, ruaReferencia: string, bairro: string): Promise<CandidatoBruto[]> {
   const caminhoAnuncio = CAMINHO_ANUNCIO_POR_PORTAL[site]
   if (!caminhoAnuncio) return []
   try {
@@ -910,7 +984,7 @@ async function extrairCandidatosDeCategoria(urlCategoria: string, site: string, 
       vistos.add(url)
       let texto = description
       if (!ENDERECO_BASE_RE.test(texto)) texto = `${ruaReferencia} ${texto}`
-      const candidato = extrairCandidato(texto, url)
+      const candidato = extrairCandidato(texto, url, bairro)
       if (candidato) candidatos.push(candidato)
     }
     console.error('[real-comparaveis] categoria', urlCategoria, ': JSON-LD deu', candidatos.length, 'candidato(s)')
@@ -948,7 +1022,7 @@ async function extrairCandidatosDeCategoria(urlCategoria: string, site: string, 
       // rua de referência como fallback só quando o texto do card não menciona nenhuma —
       // nunca sobrescreve uma rua que o card já mencionou explicitamente.
       if (!ENDERECO_BASE_RE.test(janela)) janela = `${ruaReferencia} ${janela}`
-      const candidato = extrairCandidato(janela, url)
+      const candidato = extrairCandidato(janela, url, bairro)
       if (candidato) candidatos.push(candidato)
     }
     console.error('[real-comparaveis] categoria', urlCategoria, ': total', candidatos.length, 'candidatos do HTML (JSON-LD + href)')
@@ -1055,7 +1129,7 @@ async function buscarComparaveisReaisSemLimite(params: BuscarParams, budgetMs: n
     }
     if (alvos.length === 0) return []
     const rua = ruaDoEnderecoCompleto(enderecoCompleto)
-    const resultados = await Promise.all(alvos.map(({ url, site }) => extrairCandidatosDeCategoria(url, site, rua)))
+    const resultados = await Promise.all(alvos.map(({ url, site }) => extrairCandidatosDeCategoria(url, site, rua, bairro)))
     return resultados.flat()
   }
 
@@ -1075,6 +1149,7 @@ async function buscarComparaveisReaisSemLimite(params: BuscarParams, budgetMs: n
               montarPrompt(site, maxPorPortal, tipoImovel, enderecoCompleto),
               maxPorPortal,
               fetchTimeoutMs,
+              bairro,
             )
             return { site, candidatos, categorias }
           }),
@@ -1098,7 +1173,7 @@ async function buscarComparaveisReaisSemLimite(params: BuscarParams, budgetMs: n
       return [...porPortal.flatMap((p) => p.candidatos), ...daCategoria]
     }
     if (geminiConfigurado) {
-      const { candidatos } = await buscarCandidatos(montarPrompt(null, max, tipoImovel, enderecoCompleto), max, fetchTimeoutMs)
+      const { candidatos } = await buscarCandidatos(montarPrompt(null, max, tipoImovel, enderecoCompleto), max, fetchTimeoutMs, bairro)
       return candidatos
     }
     return []
@@ -1167,6 +1242,7 @@ async function buscarComparaveisReaisSemLimite(params: BuscarParams, budgetMs: n
       raioParaTipoImovel(tipoImovel),
       cidade,
       uf,
+      bairro,
       prazoGlobalMs,
     )
     const aprovadosPorUrl = new Map(aprovados.map((c) => [c.url, c]))

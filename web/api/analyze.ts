@@ -306,7 +306,7 @@ ${
       ? `\nCOMPARÁVEIS REAIS ENCONTRADOS NA INTERNET (${comparaveisReais.length} encontrados, já geocodificados e com link verificado — esta é a ÚNICA fonte válida de amostras, NUNCA invente outras; use o endereço, a URL, a distância e o PREÇO EXATAMENTE como fornecidos):\n${comparaveisReais
           .map(
             (c) =>
-              `- ${c.endereco}${c.areaM2 ? ` (${c.areaM2} m²)` : ''}${c.distanciaM !== null ? `, a ${c.distanciaM}m do imóvel avaliado (distância real calculada)` : ''} — Preço real do anúncio: R$ ${c.valorAnunciado} — URL: ${c.url}`,
+              `- [PRECISÃO: ${c.precisaoEndereco}] ${c.endereco}${c.areaM2 ? ` (${c.areaM2} m²)` : ''}${c.distanciaM !== null ? `, a ${c.distanciaM}m do imóvel avaliado${c.precisaoEndereco === 'exato' ? ' (distância real calculada)' : ' (distância ESTIMADA — sem rua/condomínio exato no anúncio, use até o centro do bairro; declare isso na evidência)'}` : ''} — Preço real do anúncio: R$ ${c.valorAnunciado} — URL: ${c.url}`,
           )
           .join('\n')}`
       : '\nCOMPARÁVEIS REAIS ENCONTRADOS NA INTERNET: nenhum encontrado dentro do raio de busca configurado. NÃO invente amostras — "amostras" deve ser [] e "dadosInsuficientes" deve ser true.'

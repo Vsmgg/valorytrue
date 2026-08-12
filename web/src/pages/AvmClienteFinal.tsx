@@ -15,6 +15,7 @@ interface ComparavelReal {
   valorAnunciado: number | null
   distanciaM: number | null
   url: string
+  precisaoEndereco: 'exato' | 'condominio' | 'bairro'
 }
 
 export function AvmClienteFinal() {
