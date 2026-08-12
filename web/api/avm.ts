@@ -151,7 +151,6 @@ export default async function handler(request: Request) {
           cidade: propertyData.cidade,
           uf: propertyData.uf,
           bairro: propertyData.bairro,
-          cep: propertyData.cep,
           tipoImovel: propertyData.tipoImovel,
           numeroAvaliando: propertyData.numero,
         }).then((r) => r.comparaveis),

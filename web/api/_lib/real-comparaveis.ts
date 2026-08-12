@@ -29,11 +29,6 @@ interface BuscarParams {
   cidade: string
   uf: string
   bairro: string
-  /** Pedido explícito do usuário: buscar pelo CEP em vez de só pelo endereço exato — usado
-   * pra encontrar a página de CATÁLOGO/LISTAGEM de cada portal pra essa região (ver
-   * buscarPaginaCategoriaPorCep), que costuma render muito mais anúncios reais de uma vez do
-   * que pedir anúncios individuais direto. */
-  cep?: string
   tipoImovel: string
   /** Número do endereço do imóvel avaliando (ex.: "250") — usado só pra priorizar, na
    * ordenação final, um candidato cujo endereço bate no número exato do avaliando, mesmo que
@@ -485,80 +480,6 @@ interface ResultadoBuscaPortal {
 }
 
 /**
- * Pedido explícito do usuário: em vez de pedir anúncios individuais direto (que o grounding do
- * Gemini às vezes não consegue achar de forma confiável), busca primeiro a URL da página de
- * CATÁLOGO/LISTAGEM de cada portal pra região do CEP informado (ex.: pesquisar algo como
- * "06420-130 imóveis comprar site:chavesnamao.com.br") — depois essa página é buscada DIRETO
- * (ver extrairCandidatosDeCategoria) e os anúncios individuais reais são extraídos do HTML
- * dela, o que já foi testado manualmente e confirmado funcionar (15 de 15 anúncios reais
- * extraídos de uma única página de catálogo). Devolve só a URL, não faz extração aqui.
- */
-async function buscarPaginaCategoriaPorCep(
-  site: string,
-  cep: string,
-  bairro: string,
-  cidade: string,
-  uf: string,
-  tipoImovel: string,
-  timeoutMs: number,
-): Promise<string | null> {
-  const apiKey = process.env.GEMINI_API_KEY
-  if (!apiKey) return null
-  const prompt = `Busque no Google a URL da página de LISTAGEM/CATÁLOGO (a página que lista MÚLTIPLOS imóveis de uma vez, tipo "X imóveis à venda em [bairro]" — NÃO um anúncio de uma única unidade) de imóveis do tipo "${tipoImovel}" À VENDA, em site:${site}, para a região do CEP ${cep} (bairro ${bairro}, ${cidade} - ${uf}). Responda SOMENTE com a URL encontrada, nada mais, sem introdução.`
-  const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash'
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        tools: [{ google_search: {} }],
-        generationConfig: { temperature: 0.2, thinkingConfig: { thinkingBudget: 0 }, maxOutputTokens: 1024 },
-      }),
-      signal: AbortSignal.timeout(timeoutMs),
-    })
-    if (!res.ok) {
-      console.error('[real-comparaveis] categoria-por-cep non-OK', site, res.status)
-      return null
-    }
-    const data = (await res.json()) as {
-      candidates?: { content?: { parts?: { text?: string }[] }; groundingMetadata?: { groundingChunks?: GroundingChunk[] } }[]
-    }
-    const chunks = data.candidates?.[0]?.groundingMetadata?.groundingChunks || []
-    // As URLs do grounding vêm sempre como link de redirecionamento do Google — resolve antes
-    // de checar o domínio (ver resolverRedirecionamentoGemini).
-    const brutas = chunks.map((c) => c.web?.uri).filter((u): u is string => Boolean(u))
-    const resolvidas = await Promise.all(brutas.map((u) => resolverRedirecionamentoGemini(u)))
-    let achada = resolvidas.find((u) => urlPertenceAPortalConhecido(u))
-    // Fallback: o texto da RESPOSTA da IA (não os chunks de grounding) foi pedido explicitamente
-    // pra ser só a URL — às vezes o grounding não gera um chunk pro resultado que a IA de fato
-    // usou pra responder (confirmado via teste real: grounding trouxe 0 chunks no domínio certo
-    // em duas regiões bem diferentes, mesmo com resultado plausível), mas o texto puro da
-    // resposta ainda pode conter uma URL válida e real (o Google Search grounding não inventa
-    // URLs fora do que a busca encontrou, só a citação via chunk que às vezes falha).
-    if (!achada) {
-      const textoResposta = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? '').join('') || ''
-      const matchUrl = textoResposta.match(/https?:\/\/\S+/)
-      if (matchUrl) {
-        const resolvidaDoTexto = await resolverRedirecionamentoGemini(matchUrl[0].replace(/[.,;)\]]+$/, ''))
-        if (urlPertenceAPortalConhecido(resolvidaDoTexto)) achada = resolvidaDoTexto
-      }
-    }
-    console.error(
-      '[real-comparaveis] categoria-por-cep',
-      site,
-      ':',
-      achada || `nenhuma URL do portal encontrada (${chunks.length} chunk(s) de grounding, ${brutas.length} url(s) bruta(s))`,
-    )
-    return achada ?? null
-  } catch (err) {
-    console.error('[real-comparaveis] categoria-por-cep error', site, String(err))
-    return null
-  }
-}
-
-/**
  * BUG real encontrado e corrigido — a causa raiz de "0 candidatos aceitos" no caminho do
  * Gemini: as URLs devolvidas em `groundingChunks[].web.uri` NUNCA são o link direto do
  * anúncio — são SEMPRE um link de redirecionamento do próprio Google
@@ -822,17 +743,30 @@ async function geocodarEFiltrar(
 // estes 5 portais.
 const PORTAIS = ['imovelweb.com.br', 'attria.com.br', 'chavesnamao.com.br', 'vivareal.com.br', 'zapimoveis.com.br']
 
-function montarPrompt(site: string | null, max: number, tipoImovel: string, enderecoCompleto: string): string {
+// BUG real encontrado e corrigido — pedido explícito do usuário ("tire endereço e faça que
+// busque pelo bairro"): a busca por ENDEREÇO/rua específica no prompt (versão anterior) e a
+// descoberta de catálogo por CEP (buscarPaginaCategoriaPorCep) mostraram-se instáveis em teste
+// real repetido — o grounding do Gemini frequentemente não achava nada pra uma consulta tão
+// específica, e em pelo menos 2 casos reais (confirmado em log de produção) "achou" uma URL de
+// catálogo que na verdade dava 404 (provavelmente um padrão de URL plausível, mas nunca
+// confirmado por uma busca real — risco de alucinação do texto puro da resposta). Já testado
+// manualmente e confirmado, MÚLTIPLAS vezes, que buscar direto pela página de catálogo do
+// BAIRRO inteiro (ex. "imovelweb.com.br/apartamentos-venda-jardim-belval-barueri.html") sempre
+// retorna dezenas de anúncios reais, de forma consistente — bairro é uma unidade geográfica bem
+// mais indexada e estável do que um endereço/CEP exato. O filtro de raio/proximidade em relação
+// ao endereço avaliando continua acontecendo DEPOIS, na geocodificação de cada candidato — só a
+// CONSULTA de busca deixou de ser amarrada ao endereço exato.
+function montarPrompt(site: string | null, max: number, tipoImovel: string, bairro: string, cidade: string, uf: string): string {
   const escopo = site
     ? `Busque especificamente em site:${site}.`
     : `Busque especificamente nestes sites, nesta ordem de prioridade: ${PORTAIS.map((p) => `site:${p}`).join(', ')} — e também em imobiliárias locais da região se os anteriores não trouxerem resultado.`
-  return `Busque na internet até ${max} ANÚNCIOS de imóveis do tipo "${tipoImovel}" À VENDA (unidades específicas, com preço, não páginas institucionais de condomínio/empreendimento) o mais próximo possível do endereço "${enderecoCompleto}". Priorize fortemente a MESMA rua/avenida e o MESMO prédio/condomínio (mesmo nome de condomínio ou mesmo número do endereço) — é comum haver várias unidades à venda no mesmo empreendimento. Se não houver opções suficientes na mesma rua, aceite imóveis em ruas vizinhas dentro de um raio de até 1000 metros do endereço informado, sempre preferindo os mais próximos. NÃO traga imóveis fora desse raio de 1000 metros.
+  return `Busque na internet até ${max} ANÚNCIOS de imóveis do tipo "${tipoImovel}" À VENDA (unidades específicas, com preço, não páginas institucionais de condomínio/empreendimento) no bairro "${bairro}", ${cidade} - ${uf}. Cubra o bairro inteiro — não se limite a uma única rua ou condomínio, traga o maior número possível de opções reais e diferentes dessa região.
 
 IMPORTANTE — SOMENTE VENDA: busque APENAS imóveis À VENDA. NUNCA traga imóveis para ALUGUEL/LOCAÇÃO — se um anúncio mencionar "aluguel", "locação", "alugar" ou valor mensal de locação, IGNORE-O completamente, mesmo que o restante pareça relevante.
 
 ${escopo}
 
-Para cada anúncio encontrado, escreva uma linha própria com o endereço EXATO (rua e número, e nome do condomínio/prédio quando houver), o PREÇO DE VENDA em R$ e a área em m². O preço é obrigatório — se uma página não tiver um preço de venda claro de uma unidade específica, não a inclua. Seja direto, sem introdução.`
+Para cada anúncio encontrado, escreva uma linha própria com o endereço (rua e número quando divulgados no anúncio, ou o nome do condomínio/empreendimento quando a rua não for divulgada — comum em casas de condomínio fechado), o PREÇO DE VENDA em R$ e a área em m². O preço é obrigatório — se uma página não tiver um preço de venda claro de uma unidade específica, não a inclua. Seja direto, sem introdução.`
 }
 
 /** O mecanismo de busca programável (Custom Search Engine) já está configurado, no painel do
@@ -1058,7 +992,7 @@ async function buscarComparaveisReaisSemLimite(params: BuscarParams, budgetMs: n
   // calls for too many candidates at once adds real tail latency (and risks throttling),
   // which matters a lot under a tight time budget. Callers with a generous dedicated budget
   // (find-amostras.ts) ask for more; callers squeezed inside a bigger request ask for fewer.
-  const { enderecoCompleto, cidade, uf, bairro, cep, tipoImovel, numeroAvaliando, max = budgetMs >= 10_000 ? 12 : 6, offsetBase = 0 } = params
+  const { enderecoCompleto, cidade, uf, bairro, tipoImovel, numeroAvaliando, max = budgetMs >= 10_000 ? 12 : 6, offsetBase = 0 } = params
   // "Bate o número exato do avaliando" vira a chave de ordenação primária (ver comparador
   // abaixo) — pedido explícito do usuário: "se houver um imóvel no endereço exato, priorize
   // esse resultado", mesmo que ruído de geocodificação faça outro candidato parecer levemente
@@ -1108,9 +1042,9 @@ async function buscarComparaveisReaisSemLimite(params: BuscarParams, budgetMs: n
   const prazoGlobalMs = startedAt + budgetMs - RESERVA_FINAL_MS
 
   // Páginas de categoria já vistas em rodadas anteriores nunca são buscadas de novo (o
-  // conteúdo não muda de uma rodada pra outra dentro da mesma avaliação). Teto subiu de 2 pra
-  // 5 — a 1ª rodada agora descobre deliberadamente até 1 página de catálogo por portal (ver
-  // buscarPaginaCategoriaPorCep), então precisa de espaço pra buscar as 5 de uma vez.
+  // conteúdo não muda de uma rodada pra outra dentro da mesma avaliação). Teto de 5 por
+  // rodada — a busca agora é bairro-wide (ver montarPrompt), então é comum os 5 portais
+  // baterem incidentalmente numa página de catálogo do bairro na mesma rodada.
   const categoriasJaBuscadas = new Set<string>()
   const MAX_CATEGORIAS_POR_RODADA = 5
 
@@ -1133,47 +1067,24 @@ async function buscarComparaveisReaisSemLimite(params: BuscarParams, budgetMs: n
     return resultados.flat()
   }
 
-  // A descoberta de página de catálogo por CEP só roda na 1ª rodada de cada chamada — a
-  // página de catálogo de um CEP é essencialmente estática, repetir a busca por ela a cada
-  // rodada só gastaria mais chamadas ao Gemini sem achar nada novo (o cache
-  // `categoriasJaBuscadas` já evita rebuscar a MESMA URL, mas evita também a chamada de
-  // descoberta em si).
-  let descobertaPorCepFeita = false
-
   async function umaRodada(_rodadaIndex: number, fetchTimeoutMs: number): Promise<CandidatoBruto[]> {
     if (buscarPorPortais) {
-      const [porPortal, categoriasPorCep] = await Promise.all([
-        Promise.all(
-          PORTAIS.map(async (site) => {
-            const { candidatos, categorias } = await buscarCandidatos(
-              montarPrompt(site, maxPorPortal, tipoImovel, enderecoCompleto),
-              maxPorPortal,
-              fetchTimeoutMs,
-              bairro,
-            )
-            return { site, candidatos, categorias }
-          }),
-        ),
-        !descobertaPorCepFeita && cep
-          ? Promise.all(
-              PORTAIS.map(async (site) => ({
-                site,
-                categorias: [await buscarPaginaCategoriaPorCep(site, cep, bairro, cidade, uf, tipoImovel, fetchTimeoutMs)].filter(
-                  (u): u is string => Boolean(u),
-                ),
-              })),
-            )
-          : Promise.resolve([]),
-      ])
-      descobertaPorCepFeita = true
-      const daCategoria = await buscarDeCategoriasNovas([
-        ...porPortal.map(({ site, categorias }) => ({ site, categorias })),
-        ...categoriasPorCep,
-      ])
+      const porPortal = await Promise.all(
+        PORTAIS.map(async (site) => {
+          const { candidatos, categorias } = await buscarCandidatos(
+            montarPrompt(site, maxPorPortal, tipoImovel, bairro, cidade, uf),
+            maxPorPortal,
+            fetchTimeoutMs,
+            bairro,
+          )
+          return { site, candidatos, categorias }
+        }),
+      )
+      const daCategoria = await buscarDeCategoriasNovas(porPortal.map(({ site, categorias }) => ({ site, categorias })))
       return [...porPortal.flatMap((p) => p.candidatos), ...daCategoria]
     }
     if (geminiConfigurado) {
-      const { candidatos } = await buscarCandidatos(montarPrompt(null, max, tipoImovel, enderecoCompleto), max, fetchTimeoutMs, bairro)
+      const { candidatos } = await buscarCandidatos(montarPrompt(null, max, tipoImovel, bairro, cidade, uf), max, fetchTimeoutMs, bairro)
       return candidatos
     }
     return []
