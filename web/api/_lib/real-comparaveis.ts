@@ -634,7 +634,8 @@ async function geocodarEFiltrar(
   raioM: number | null,
   cidade: string,
   uf: string,
-): Promise<ComparavelReal[]> {
+  prazoMs: number,
+): Promise<{ aprovados: ComparavelReal[]; processadosUrls: string[] }> {
   // BUG real encontrado e corrigido: geocodificava TODOS os candidatos novos de uma rodada em
   // paralelo (Promise.all) — a política de uso do Nominatim proíbe explicitamente requisições
   // concorrentes, e isso era tolerável antes porque cada rodada só trazia 1-3 candidatos novos.
@@ -658,10 +659,28 @@ async function geocodarEFiltrar(
   // dois pontos igualmente sujeitos ao mesmo bloqueio.
   const NOMINATIM_INTERVALO_MS = 350
   const resultados: (ComparavelReal | null)[] = []
+  const processadosUrls: string[] = []
+  // BUG real encontrado e corrigido: a correção da janela de extração de categoria (ver
+  // extrairCandidatosDeCategoria) passou a achar MUITO mais candidatos brutos por rodada (até
+  // 23 de 30 num teste real, contra 1 de 30 antes) — mas cada candidato geocodificado em SÉRIE
+  // custa ~350ms de intervalo + o tempo real do Nominatim (~300-800ms), então 20-30 candidatos
+  // novos numa única rodada podem sozinhos consumir 15-25s. Como buscarComparaveisReais tem um
+  // `withTimeout` externo que, ao estourar o orçamento total, descarta TUDO (não devolve
+  // parcial), geocodificar mais candidatos do que cabe no tempo restante corria o risco de
+  // travar a função até o timeout externo — trocando "poucas amostras" por "ZERO amostras",
+  // uma regressão pior que o bug original. Este laço agora para de geocodificar assim que o
+  // prazo (compartilhado com o orçamento total da chamada) se esgota, devolvendo o que já foi
+  // verificado — os candidatos restantes ficam pra próxima rodada (ou são perdidos de forma
+  // graciosa se o orçamento total realmente acabou), nunca travando a função inteira.
   for (const candidato of candidatos) {
+    if (Date.now() >= prazoMs) {
+      console.error('[real-comparaveis] geocodificação interrompida por prazo —', candidatos.length - resultados.length, 'candidato(s) não verificado(s) nesta rodada')
+      break
+    }
     // A cidade/UF são anexadas aqui (o endereço do candidato sozinho não as tem, ao contrário
     // do endereço do imóvel avaliando) — sem isso, nomes de rua comuns podem geocodificar para
     // a cidade errada, ou simplesmente não resolver.
+    processadosUrls.push(candidato.url)
     const coords = await geocodeEndereco(`${candidato.endereco}, ${cidade} - ${uf}`)
     if (!coords) {
       console.error('[real-comparaveis] candidato descartado (geocode falhou):', candidato.endereco)
@@ -678,7 +697,14 @@ async function geocodarEFiltrar(
     if (candidato !== candidatos[candidatos.length - 1]) await sleep(NOMINATIM_INTERVALO_MS)
   }
   // Mais próximos primeiro — preferência por proximidade mesmo quando o raio permite até 500m.
-  return resultados.filter((c): c is ComparavelReal => c !== null).sort((a, b) => (a.distanciaM ?? 0) - (b.distanciaM ?? 0))
+  const aprovados = resultados.filter((c): c is ComparavelReal => c !== null).sort((a, b) => (a.distanciaM ?? 0) - (b.distanciaM ?? 0))
+  // Devolve também QUAIS urls chegaram a ser processadas (aprovadas ou não) — distinto de
+  // "todos os candidatos recebidos", já que o corte por prazo acima pode ter deixado alguns de
+  // fora sem sequer tentar. O chamador (verificarNovos) usa isso pra só marcar como
+  // "verificado/rejeitado" quem de fato passou pela checagem — os que ficaram de fora por falta
+  // de tempo continuam elegíveis pra tentativa numa rodada seguinte, em vez de serem tratados
+  // como rejeitados permanentemente.
+  return { aprovados, processadosUrls }
 }
 
 /**
@@ -963,6 +989,16 @@ async function buscarComparaveisReaisSemLimite(params: BuscarParams, budgetMs: n
   const buscarPorPortais = geminiConfigurado && budgetMs >= 10_000
   const maxPorPortal = Math.max(2, Math.ceil(max / PORTAIS.length))
   const startedAt = Date.now()
+  // Prazo absoluto (timestamp, não duração) compartilhado por TODAS as geocodificações desta
+  // chamada — reserva uma margem antes do fim do orçamento total pra sobrar tempo real de
+  // serialização/resposta. Existe porque `buscarComparaveisReais` (o wrapper externo) corta a
+  // chamada inteira no orçamento total e descarta QUALQUER progresso se isso acontecer (ver
+  // `withTimeout`) — sem geocodarEFiltrar respeitar esse mesmo prazo internamente, uma rodada
+  // com muitos candidatos novos (algo que passou a ser comum depois da correção da janela de
+  // extração de categoria) podia sozinha ultrapassar o orçamento total e perder TUDO que já
+  // tinha sido achado, não só os candidatos daquela rodada.
+  const RESERVA_FINAL_MS = 1_500
+  const prazoGlobalMs = startedAt + budgetMs - RESERVA_FINAL_MS
 
   // Páginas de categoria já vistas em rodadas anteriores nunca são buscadas de novo (o
   // conteúdo não muda de uma rodada pra outra dentro da mesma avaliação). Teto subiu de 2 pra
@@ -1092,9 +1128,23 @@ async function buscarComparaveisReaisSemLimite(params: BuscarParams, budgetMs: n
     // acumulada inteira pra calcular uma mediana melhor — pode rodar de novo à vontade.
     const aVerificar = candidatos.filter((c) => !verificados.has(c.url))
     if (aVerificar.length === 0) return
-    const resultado = await geocodarEFiltrar(aVerificar, origemConfirmada, raioParaTipoImovel(tipoImovel), cidade, uf)
-    const aprovadosPorUrl = new Map(resultado.map((c) => [c.url, c]))
-    for (const c of aVerificar) verificados.set(c.url, aprovadosPorUrl.get(c.url) ?? null)
+    const { aprovados, processadosUrls } = await geocodarEFiltrar(
+      aVerificar,
+      origemConfirmada,
+      raioParaTipoImovel(tipoImovel),
+      cidade,
+      uf,
+      prazoGlobalMs,
+    )
+    const aprovadosPorUrl = new Map(aprovados.map((c) => [c.url, c]))
+    // Só marca como "verificado" (aprovado OU rejeitado) quem de fato foi processado — um
+    // candidato deixado de fora pelo corte de prazo em geocodarEFiltrar NÃO entra aqui, então
+    // continua elegível pra ser tentado de novo numa rodada seguinte, em vez de ser tratado
+    // como rejeitado permanentemente só por falta de tempo nesta rodada.
+    const processadosSet = new Set(processadosUrls)
+    for (const c of aVerificar) {
+      if (processadosSet.has(c.url)) verificados.set(c.url, aprovadosPorUrl.get(c.url) ?? null)
+    }
   }
   function finaisAtuais(): ComparavelReal[] {
     const semOutliersUrls = new Set(filtrarOutliersDePreco(candidatosAcumulados).map((c) => c.url))
