@@ -179,7 +179,11 @@ Gere o array "amostras" com uma entrada para cada um dos ${comparaveisReais.leng
     }
 
     return json({ amostras: amostrasFinal })
-  } catch {
+  } catch (err) {
+    // Sem isso, uma falha real (timeout, erro de rede, resposta malformada) fica invisível nos
+    // logs — indistinguível de qualquer outro motivo (mesma correção aplicada em todo o
+    // pipeline depois de confirmado em produção que analyze-verify.ts sofria disso).
+    console.error('[generate-amostras] erro ao conectar/processar resposta do Gemini:', String(err))
     return json({ error: 'Não foi possível conectar à API do Gemini.' }, 502)
   }
 }

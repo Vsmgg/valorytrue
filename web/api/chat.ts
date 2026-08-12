@@ -142,7 +142,8 @@ export default async function handler(request: Request) {
     reply = reply.replace(/\*\*(.+?)\*\*/gs, '$1').replace(/#{1,6}\s*/g, '')
 
     return corsJson({ reply })
-  } catch {
+  } catch (err) {
+    console.error('[chat] erro ao conectar/processar resposta do Gemini:', String(err))
     return corsJson({ error: 'Não foi possível conectar à API do Gemini.' }, 502)
   }
 }

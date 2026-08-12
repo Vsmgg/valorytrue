@@ -156,7 +156,8 @@ export default async function handler(request: Request) {
     }
 
     return json(revision as Record<string, unknown>)
-  } catch {
+  } catch (err) {
+    console.error('[revise] erro ao conectar/processar resposta do Gemini:', String(err))
     return json({ error: 'Não foi possível conectar à API do Gemini.' }, 502)
   }
 }

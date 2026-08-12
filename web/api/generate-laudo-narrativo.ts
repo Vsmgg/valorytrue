@@ -357,7 +357,8 @@ export default async function handler(request: Request) {
     texto = texto.replace(/\*\*(.+?)\*\*/gs, '$1').replace(/#{1,6}\s*/g, '')
 
     return json({ texto })
-  } catch {
+  } catch (err) {
+    console.error('[generate-laudo-narrativo] erro ao conectar/processar resposta do Gemini:', String(err))
     return json({ error: 'Não foi possível conectar à API do Gemini na geração do laudo narrativo.' }, 502)
   }
 }

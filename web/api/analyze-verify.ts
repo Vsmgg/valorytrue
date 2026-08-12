@@ -192,7 +192,14 @@ Audite este rascunho e responda com o JSON final corrigido.`
     recalcularResultadoNBR(resultado, !temFotos)
 
     return json({ resultado })
-  } catch {
+  } catch (err) {
+    // BUG real encontrado e corrigido: este catch nunca logava o erro real antes de devolver a
+    // mensagem genérica — confirmado via teste real: um caso apareceu na tela do usuário como
+    // "Não foi possível conectar à API do Gemini na verificação", mas o log de produção não
+    // tinha NENHUM rastro do motivo real (timeout? erro de rede? resposta malformada?), porque
+    // esta linha nunca imprimia nada. Sem isso, um erro real e recorrente fica invisível pra
+    // sempre, indistinguível de um problema de rede pontual.
+    console.error('[analyze-verify] erro ao conectar/processar resposta do Gemini:', String(err))
     return json({ error: 'Não foi possível conectar à API do Gemini na verificação.' }, 502)
   }
 }

@@ -145,7 +145,8 @@ export default async function handler(request: Request) {
       resultadoJson: parsed,
     })
     return json(parsed as Record<string, unknown>)
-  } catch {
+  } catch (err) {
+    console.error('[portfolio-batch] erro ao conectar/processar resposta do Gemini:', String(err))
     return json({ error: 'Não foi possível conectar à API do Gemini.' }, 502)
   }
 }
