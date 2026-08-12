@@ -123,7 +123,18 @@ export function Fase2Processando({ input, onComplete }: Fase2Props) {
             const res0 = await fetch('/api/find-amostras', {
               method: 'POST',
               headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ propertyData: input.propertyData, offsetBase: proximoOffsetBase, origemCoords }),
+              body: JSON.stringify({
+                propertyData: input.propertyData,
+                offsetBase: proximoOffsetBase,
+                origemCoords,
+                // BUG real encontrado e corrigido: sem isso, cada chamada encadeada
+                // redescobria a MESMA página de catálogo (é estática) e gastava seu tempo de
+                // geocodificação nos MESMOS candidatos já achados antes, nunca avançando pros
+                // próximos — confirmado via log real (4 chamadas seguidas viram "34
+                // candidatos", mas o total final travava em 3-6 amostras). Manda as URLs já
+                // confirmadas pro backend pular elas e focar o tempo em candidatos novos.
+                urlsJaVistas: [...urlsVistas],
+              }),
             })
             const data0 = (await res0.json().catch(() => ({}))) as {
               comparaveisReais?: ComparavelReal[]

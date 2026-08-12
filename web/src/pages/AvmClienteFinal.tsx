@@ -57,7 +57,15 @@ export function AvmClienteFinal() {
           const res0 = await fetch('/api/find-amostras', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ propertyData: form.propertyData, offsetBase: proximoOffsetBase, origemCoords }),
+            body: JSON.stringify({
+              propertyData: form.propertyData,
+              offsetBase: proximoOffsetBase,
+              origemCoords,
+              // Mesmo fix aplicado em fase2-processando.tsx: sem isso, cada chamada
+              // encadeada redescobre a mesma página de catálogo estática e gasta seu tempo
+              // de geocodificação nos mesmos candidatos já achados, nunca avançando.
+              urlsJaVistas: [...urlsVistas],
+            }),
           })
           const data0 = (await res0.json().catch(() => ({}))) as {
             comparaveisReais?: ComparavelReal[]

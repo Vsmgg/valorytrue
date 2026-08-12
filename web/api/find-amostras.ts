@@ -52,11 +52,13 @@ export default async function handler(request: Request) {
   let propertyData: PropertyData
   let offsetBase: number
   let origemCoords: { lat: number; lon: number } | undefined
+  let urlsJaVistas: string[] | undefined
   try {
     const body = (await request.json()) as {
       propertyData?: PropertyData
       offsetBase?: number
       origemCoords?: { lat: number; lon: number }
+      urlsJaVistas?: string[]
     }
     if (!body.propertyData) {
       return json({ error: 'Dados do imóvel não informados.' }, 400)
@@ -64,6 +66,7 @@ export default async function handler(request: Request) {
     propertyData = body.propertyData
     offsetBase = Number.isFinite(body.offsetBase) ? Number(body.offsetBase) : 0
     origemCoords = body.origemCoords
+    urlsJaVistas = Array.isArray(body.urlsJaVistas) ? body.urlsJaVistas : undefined
   } catch {
     return json({ error: 'Corpo da requisição inválido.' }, 400)
   }
@@ -78,6 +81,7 @@ export default async function handler(request: Request) {
     cidade: propertyData.cidade,
     uf: propertyData.uf,
     bairro: propertyData.bairro,
+    urlsJaVistas,
     tipoImovel: propertyData.tipoImovel,
     numeroAvaliando: propertyData.numero,
     max: 20,

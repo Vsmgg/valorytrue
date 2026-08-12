@@ -29,6 +29,18 @@ interface BuscarParams {
   cidade: string
   uf: string
   bairro: string
+  /** URLs de amostras que uma chamada ANTERIOR desta mesma busca encadeada já devolveu como
+   * resultado (ver find-amostras.ts) — pedido explícito do usuário: "seja fixo, sempre trazer
+   * 10 amostras". BUG real encontrado e corrigido: sem isso, cada chamada encadeada
+   * redescobria do zero a MESMA página de catálogo (é estática — sempre lista os mesmos
+   * anúncios, na mesma ordem) e gastava seu orçamento de geocodificação nos MESMOS primeiros
+   * candidatos que a chamada anterior já tinha verificado (confirmado via log real: 4 chamadas
+   * seguidas encontraram "34 candidatos do HTML", mas a lista final ficava travada em 3-6
+   * amostras — o `if (novos.length === 0) break` do front-end interrompia a cadeia cedo demais
+   * porque quase tudo já tinha sido "descoberto" antes, mesmo havendo 20+ candidatos reais
+   * ainda não tentados na mesma página). Candidatos com url aqui são pulados ANTES de gastar
+   * tempo de geocodificação neles — o chamador já os tem, não precisa de novo. */
+  urlsJaVistas?: string[]
   tipoImovel: string
   /** Número do endereço do imóvel avaliando (ex.: "250") — usado só pra priorizar, na
    * ordenação final, um candidato cujo endereço bate no número exato do avaliando, mesmo que
@@ -991,7 +1003,8 @@ async function buscarComparaveisReaisSemLimite(params: BuscarParams, budgetMs: n
   // calls for too many candidates at once adds real tail latency (and risks throttling),
   // which matters a lot under a tight time budget. Callers with a generous dedicated budget
   // (find-amostras.ts) ask for more; callers squeezed inside a bigger request ask for fewer.
-  const { enderecoCompleto, cidade, uf, bairro, tipoImovel, numeroAvaliando, max = budgetMs >= 10_000 ? 12 : 6, offsetBase = 0 } = params
+  const { enderecoCompleto, cidade, uf, bairro, tipoImovel, numeroAvaliando, max = budgetMs >= 10_000 ? 12 : 6, offsetBase = 0, urlsJaVistas } = params
+  const urlsJaVistasSet = new Set(urlsJaVistas ?? [])
   // "Bate o número exato do avaliando" vira a chave de ordenação primária (ver comparador
   // abaixo) — pedido explícito do usuário: "se houver um imóvel no endereço exato, priorize
   // esse resultado", mesmo que ruído de geocodificação faça outro candidato parecer levemente
@@ -1108,7 +1121,11 @@ async function buscarComparaveisReaisSemLimite(params: BuscarParams, budgetMs: n
   // só ADICIONA ao array (nunca filtra o que já estava lá).
   const vistos = new Set<string>()
   function adicionarNovos(acumulado: CandidatoBruto[], novos: CandidatoBruto[]): CandidatoBruto[] {
-    const novosUnicos = novos.filter((c) => !vistos.has(c.url))
+    // `urlsJaVistasSet` filtra ANTES de entrar no acumulado — sem isso, o tempo de
+    // geocodificação desta chamada seria gasto reverificando candidatos que uma chamada
+    // encadeada anterior já devolveu como amostra confirmada (ver comentário em
+    // BuscarParams.urlsJaVistas), nunca sobrando pra achar os que realmente faltam.
+    const novosUnicos = novos.filter((c) => !vistos.has(c.url) && !urlsJaVistasSet.has(c.url))
     for (const c of novosUnicos) vistos.add(c.url)
     return [...acumulado, ...novosUnicos]
   }
