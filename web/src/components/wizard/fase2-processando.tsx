@@ -97,11 +97,14 @@ export function Fase2Processando({ input, onComplete }: Fase2Props) {
         // quantidade boa de amostras reais ou esgotar o tempo total que vale a pena gastar
         // aqui. Uma falha em qualquer chamada não é fatal — /api/analyze busca por conta
         // própria se receber uma lista vazia.
-        // Meta de até 20 amostras reais únicas (pedido explícito do usuário — Brave + Gemini
-        // rodando juntos, deduplicados). Subiu de 6/180s pra 10/300s a pedido do usuário ("mais
-        // páginas", aceitando demorar mais) — a geocodificação em série (ver geocodarEFiltrar)
-        // deixou cada rodada mais lenta, então mais chamadas/tempo total compensam isso.
-        const ALVO_AMOSTRAS_FRONTEND = 20
+        // BUG real encontrado e corrigido: com a busca por bairro (muito mais eficaz), o alvo de
+        // 20 deixou de ser um teto realista — confirmado via log real de produção que uma busca
+        // acumulou 32 comparáveis reais (4 lotes de 8), e a passada de verificação seguinte
+        // (analyze-verify.ts, que reescreve a lista de amostras inteira a cada chamada) estourou
+        // o tempo do servidor e falhou com "TimeoutError". Uma busca com só 16 comparáveis (2
+        // lotes) no mesmo dia funcionou normalmente. 15 dá folga confortável acima do mínimo de
+        // 10 exigido, sem sobrecarregar as passadas seguintes.
+        const ALVO_AMOSTRAS_FRONTEND = 15
         const MAX_CHAMADAS_BUSCA = 10
         const TEMPO_MAX_BUSCA_MS = 300_000
         let comparaveisReais: ComparavelReal[] = []
@@ -147,7 +150,12 @@ export function Fase2Processando({ input, onComplete }: Fase2Props) {
             const novos = data0.comparaveisReais.filter((c) => !urlsVistas.has(c.url))
             if (novos.length === 0) break // sem resultado novo nesta chamada — mais chamadas não ajudariam
             for (const c of novos) urlsVistas.add(c.url)
-            comparaveisReais = [...comparaveisReais, ...novos]
+            // BUG real encontrado e corrigido: o corte no início do loop ("já bati o alvo, não
+            // chamo de novo") não impedia UMA chamada de sozinha devolver mais candidatos do que
+            // cabiam no alvo — com a busca por bairro achando dezenas de uma vez, isso permitia
+            // passar longe do alvo (confirmado: 32 acumulados com alvo de 20). Corta aqui, logo
+            // após somar, pra nunca ultrapassar o teto de verdade.
+            comparaveisReais = [...comparaveisReais, ...novos].slice(0, ALVO_AMOSTRAS_FRONTEND)
           } catch {
             break // segue com o que já foi acumulado até aqui
           }

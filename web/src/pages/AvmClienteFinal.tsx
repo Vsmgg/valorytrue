@@ -38,11 +38,14 @@ export function AvmClienteFinal() {
       // chamadas (cada uma uma invocação nova do Edge Function, com seu próprio limite de
       // 25s) pra buscar por mais tempo total, com meta de pelo menos 5 amostras reais.
       setBuscando(true)
-      // Espelhado com src/components/wizard/fase2-processando.tsx — mesma meta de até 15
-      // amostras reais, mesmo teto de chamadas/tempo, mesmo uso de `proximoOffsetBase`
-      // devolvido por /api/find-amostras (em vez de um passo fixo `chamada * 10`, que deixava
-      // páginas de resultado nunca consultadas a cada transição de chamada).
-      const ALVO_AMOSTRAS_FRONTEND = 20
+      // Espelhado com src/components/wizard/fase2-processando.tsx — mesmo teto de chamadas/
+      // tempo, mesmo uso de `proximoOffsetBase` devolvido por /api/find-amostras (em vez de um
+      // passo fixo `chamada * 10`, que deixava páginas de resultado nunca consultadas a cada
+      // transição de chamada). Teto de 15 (não mais 20): confirmado via log real que a busca por
+      // bairro pode acumular 30+ comparáveis, e /api/avm gera tudo numa ÚNICA chamada ao Gemini
+      // (sem lotes) — um volume grande demais arrisca o mesmo "TimeoutError" que derrubou
+      // analyze-verify.ts no módulo Empresa Avaliadora.
+      const ALVO_AMOSTRAS_FRONTEND = 15
       const MAX_CHAMADAS_BUSCA = 10
       const TEMPO_MAX_BUSCA_MS = 300_000
       let comparaveisReais: ComparavelReal[] = []
@@ -78,7 +81,10 @@ export function AvmClienteFinal() {
           const novos = data0.comparaveisReais.filter((c) => !urlsVistas.has(c.url))
           if (novos.length === 0) break
           for (const c of novos) urlsVistas.add(c.url)
-          comparaveisReais = [...comparaveisReais, ...novos]
+          // Corta logo após somar (não só no início do loop) — uma chamada sozinha pode
+          // devolver mais candidatos do que cabem no alvo, já que a busca por bairro acha
+          // dezenas de uma vez (ver mesmo fix em fase2-processando.tsx).
+          comparaveisReais = [...comparaveisReais, ...novos].slice(0, ALVO_AMOSTRAS_FRONTEND)
         } catch {
           break
         }
