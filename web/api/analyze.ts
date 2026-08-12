@@ -344,6 +344,10 @@ Gere a avaliação completa deste imóvel, seguindo a NBR 14.653.`
           responseSchema,
         },
       }),
+      // Rede de segurança: sem isso, estourar o tempo aqui é a Vercel matando a função com um
+      // erro genérico e não-recuperável (confirmado em produção acontecendo na chamada irmã de
+      // analyze-verify.ts), em vez de eu conseguir devolver um JSON de erro tratável.
+      signal: AbortSignal.timeout(23_000),
     })
 
     const data = (await geminiRes.json()) as {

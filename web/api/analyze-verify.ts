@@ -119,11 +119,22 @@ Audite este rascunho e responda com o JSON final corrigido.`
         generationConfig: {
           temperature: 0.4,
           maxOutputTokens: 8192,
-          thinkingConfig: { thinkingBudget: 1024 },
+          // BUG real encontrado e corrigido: esta era a ÚNICA das 4 chamadas ao Gemini do
+          // pipeline com thinkingBudget > 0 — as outras 3 (analyze.ts, analyze-confirm.ts,
+          // generate-amostras.ts) já usam 0 com sucesso. Confirmado via log real de produção:
+          // com o volume maior de amostras que a busca por bairro passou a entregar, essa
+          // chamada estourava os 25s do Edge Function e a Vercel matava a função com um erro
+          // genérico ("Falha na segunda verificação técnica") — thinking extra some no
+          // silêncio nesse tempo, sem visibilidade nenhuma do porquê.
+          thinkingConfig: { thinkingBudget: 0 },
           responseMimeType: 'application/json',
           responseSchema: nbrResponseSchema,
         },
       }),
+      // Mesma rede de segurança das outras 3 chamadas — sem isso, estourar o tempo aqui é a
+      // Vercel matando a função com um erro genérico e não-recuperável, em vez de eu conseguir
+      // devolver um JSON de erro tratável que o front-end já sabe mostrar ("Tentar novamente").
+      signal: AbortSignal.timeout(23_000),
     })
 
     const data = (await geminiRes.json()) as {

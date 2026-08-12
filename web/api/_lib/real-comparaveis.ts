@@ -662,7 +662,14 @@ async function geocodarEFiltrar(
   // checagem de link continua existindo, mas só na passada final (api/analyze-confirm.ts,
   // right before delivery) — um único ponto de verificação, mais perto da entrega, em vez de
   // dois pontos igualmente sujeitos ao mesmo bloqueio.
-  const NOMINATIM_INTERVALO_MS = 350
+  // BUG real encontrado e corrigido: 350ms de intervalo excede o próprio limite documentado do
+  // Nominatim (no máximo 1 requisição por SEGUNDO) — funcionava antes porque poucos candidatos
+  // por rodada nunca sustentavam esse ritmo tempo suficiente pra disparar o limite. Depois da
+  // busca por bairro passar a achar 40+ candidatos brutos por rodada, confirmado via log real de
+  // produção: uma sequência de respostas 429 "Too many requests" do Nominatim, descartando
+  // dezenas de candidatos reais só por causa do ritmo (não por serem inválidos). 1000ms respeita
+  // o limite deles à risca.
+  const NOMINATIM_INTERVALO_MS = 1_000
   const resultados: (ComparavelReal | null)[] = []
   const processadosUrls: string[] = []
   // BUG real encontrado e corrigido: a correção da janela de extração de categoria (ver
