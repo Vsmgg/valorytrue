@@ -92,8 +92,17 @@ const ENDERECO_BASE_RE = /(?:Rua|Avenida|Av\.|Alameda|Travessa|Estrada|Rodovia)[
 // rejeitava candidatos que na verdade estavam pertinho. Nunca cruza um "R$"/"m²" no meio (evita
 // capturar o preço ou a área por engano).
 const NUMERO_PROXIMO_RE = /^(?:(?!R\$|m²)[^\d]){0,20}?(\d{1,6})[A-Za-z]?\b/
-const AREA_RE = /(\d{2,4})\s*m²/
-const PRECO_RE = /R\$\s*([\d.,]+)/
+// O símbolo "²" às vezes some do texto (confirmado via teste real: um bloco JSON-LD de SEO do
+// imovelweb.com.br trazia "Área Privativa de 59 m," sem o "²") — aceita "m" sozinho como
+// fallback, desde que seguido de fronteira de palavra (evita casar o "m" no meio de outra
+// palavra qualquer).
+const AREA_RE = /(\d{2,4})\s*m(?:²|\b)/
+// "R$" às vezes vem com espaço solto DENTRO do próprio número (confirmado via teste real no
+// mesmo bloco JSON-LD: "R$ 410. 000, 00" em vez de "R$ 410.000,00") — sem tolerar espaço entre
+// os separadores de milhar/decimal, a captura parava no 1º grupo de 3 dígitos e lia um preço
+// 1000x menor (ex.: R$ 410 em vez de R$ 410.000), que depois falhava o piso de R$30 mil e
+// descartava um candidato real. Espaço é removido antes de converter pra número (ver abaixo).
+const PRECO_RE = /R\$\s*(\d{1,3}(?:[.\s]*\d{3})*(?:,\s*\d{2})?)/
 // Preço/área às vezes só aparecem de forma limpa na própria URL do anúncio, não no texto ao
 // redor do link — confirmado via teste real com páginas de categoria buscadas direto (ver
 // extrairCandidatosDeCategoria): o padrão "...-59m2-RS425000/id-.../" (ou variações, ex.
@@ -382,7 +391,7 @@ function extrairCandidato(textoBruto: string, url: string | undefined): Candidat
 
   const precoMatch = text.match(PRECO_RE)
   const valorAnunciado = precoMatch
-    ? Number(precoMatch[1].replace(/\./g, '').replace(',', '.'))
+    ? Number(precoMatch[1].replace(/\s+/g, '').replace(/\./g, '').replace(',', '.'))
     : (() => {
         const m = url.match(PRECO_URL_RE)
         return m ? Number(m[1]) : null
@@ -751,6 +760,60 @@ const CAMINHO_ANUNCIO_POR_PORTAL: Record<string, string> = {
 const HTML_CATEGORIA_TIMEOUT_MS = 6_000
 const MAX_CANDIDATOS_POR_CATEGORIA = 40
 
+interface ListingJsonLd {
+  url: string
+  description: string
+}
+
+/**
+ * BUG real encontrado e corrigido — causa raiz de "quase nenhum candidato" ao buscar direto
+ * uma página de categoria real (confirmado via teste manual contra
+ * imovelweb.com.br/imoveis-venda-jardim-belval-barueri.html, buscada exatamente como o usuário
+ * mostrou em captura de tela): o HTML puro devolvido por um fetch simples NÃO tem preço nem
+ * área em lugar nenhum perto do link de cada anúncio — o card visual da listagem só é montado
+ * depois, via JavaScript, no navegador. `extrairCandidatosDeCategoria` (abaixo) dependia só
+ * dessa janela de texto ao redor do link — sem preço ali, TODO candidato via href era
+ * descartado (preço é obrigatório em extrairCandidato).
+ *
+ * O preço e a área REALMENTE existem no HTML estático, só que em outro lugar da página: um
+ * bloco <script type="application/ld+json"> com dado estruturado schema.org
+ * ("RealEstateListing"), publicado pelo próprio portal para rich snippets do Google. Cada item
+ * já vem com a "url" direta e definitiva do anúncio (sem precisar resolver redirecionamento) e
+ * uma "description" em texto livre que geralmente cita o preço e a área (ver AREA_RE/PRECO_RE
+ * acima pelas tolerâncias de formatação encontradas nesse texto). Varre TODOS os blocos
+ * ld+json da página em busca de QUALQUER array cujos itens sejam do tipo "RealEstateListing" —
+ * não fixa um nome de chave específico (ex. "mainEntity") porque cada portal pode nomear
+ * diferente.
+ */
+function extrairListingsJsonLd(html: string): ListingJsonLd[] {
+  const listings: ListingJsonLd[] = []
+  const scriptRe = /<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi
+  let scriptMatch: RegExpExecArray | null
+  while ((scriptMatch = scriptRe.exec(html)) !== null) {
+    let data: unknown
+    try {
+      data = JSON.parse(scriptMatch[1].trim())
+    } catch {
+      continue
+    }
+    if (!data || typeof data !== 'object') continue
+    for (const valor of Object.values(data as Record<string, unknown>)) {
+      if (!Array.isArray(valor)) continue
+      for (const item of valor) {
+        if (!item || typeof item !== 'object') continue
+        const obj = item as Record<string, unknown>
+        const tipo = obj.type ?? obj['@type']
+        if (tipo !== 'RealEstateListing') continue
+        const url = typeof obj.url === 'string' ? obj.url : null
+        const description =
+          typeof obj.description === 'string' ? obj.description : typeof obj.name === 'string' ? obj.name : ''
+        if (url) listings.push({ url, description })
+      }
+    }
+  }
+  return listings
+}
+
 /**
  * Pedido explícito do usuário: em vez de só descartar uma página de categoria/listagem (ex.
  * "chavesnamao.com.br/apartamentos-a-venda/sp-barueri/bairros/avenida-.../") por não ser o
@@ -782,13 +845,29 @@ async function extrairCandidatosDeCategoria(urlCategoria: string, site: string, 
       return []
     }
     const html = await res.text()
-    // Caminho de anúncio tem caracteres especiais de regex (ex. "/imovel") — escapa antes de
-    // montar o padrão. Exige um dígito em algum lugar do link (mesmo critério de sempre pra
-    // distinguir anúncio de unidade de outra coisa).
-    const escapado = caminhoAnuncio.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const hrefRe = new RegExp(`href="([^"]*${escapado}[^"]*\\d[^"]*)"`, 'gi')
     const candidatos: CandidatoBruto[] = []
     const vistos = new Set<string>()
+
+    // 1ª fonte, PRIORITÁRIA: dado estruturado JSON-LD (ver extrairListingsJsonLd) — url direta
+    // e definitiva do anúncio + descrição que quase sempre já traz preço/área, presente no HTML
+    // estático independente de o card visual da listagem ser montado via JavaScript.
+    for (const { url, description } of extrairListingsJsonLd(html)) {
+      if (candidatos.length >= MAX_CANDIDATOS_POR_CATEGORIA) break
+      if (vistos.has(url)) continue
+      vistos.add(url)
+      let texto = description
+      if (!ENDERECO_BASE_RE.test(texto)) texto = `${ruaReferencia} ${texto}`
+      const candidato = extrairCandidato(texto, url)
+      if (candidato) candidatos.push(candidato)
+    }
+    console.error('[real-comparaveis] categoria', urlCategoria, ': JSON-LD deu', candidatos.length, 'candidato(s)')
+
+    // 2ª fonte, FALLBACK: janela de texto ao redor de cada href de anúncio individual — cobre
+    // portais sem (ou com) JSON-LD incompleto. Caminho de anúncio tem caracteres especiais de
+    // regex (ex. "/imovel") — escapa antes de montar o padrão. Exige um dígito em algum lugar do
+    // link (mesmo critério de sempre pra distinguir anúncio de unidade de outra coisa).
+    const escapado = caminhoAnuncio.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const hrefRe = new RegExp(`href="([^"]*${escapado}[^"]*\\d[^"]*)"`, 'gi')
     let match: RegExpExecArray | null
     while ((match = hrefRe.exec(html)) !== null && candidatos.length < MAX_CANDIDATOS_POR_CATEGORIA) {
       let url = match[1].replace(/&amp;/g, '&')
@@ -796,8 +875,17 @@ async function extrairCandidatosDeCategoria(urlCategoria: string, site: string, 
       if (!url.startsWith('http') || vistos.has(url)) continue
       vistos.add(url)
       // Janela de texto ao redor do link — o "card" do anúncio na listagem costuma ter
-      // preço/área pertinho do link no HTML (antes ou depois, varia por portal).
-      const inicio = Math.max(0, match.index - 300)
+      // preço/área pertinho do link no HTML (antes ou depois, varia por portal). BUG real
+      // encontrado e corrigido: testado manualmente contra uma página de categoria real do
+      // imovelweb.com.br — o preço ("R$ 630.000") fica no TOPO do card, dentro do elemento
+      // "data-to-posting" que abre o card inteiro, enquanto o "href=" de fato (que
+      // extrairCandidatosDeCategoria usa pra achar o link) só aparece ~1300 caracteres depois,
+      // mais pro fim do mesmo card — uma janela de -300 nunca alcançava o preço, rejeitando o
+      // candidato quase sempre (confirmado: só 1 de 30 candidatos reais aceito com -300/+800).
+      // Alargar a janela pra trás resolve: -2000/+800 aceitou 23 de 30 candidatos reais nesse
+      // mesmo teste, sem custo — o filtro de preço/endereço já rejeita qualquer ruído extra que
+      // a janela maior capturar do card vizinho.
+      const inicio = Math.max(0, match.index - 2_000)
       const fim = Math.min(html.length, match.index + match[0].length + 800)
       let janela = removerHtml(html.slice(inicio, fim))
       // BUG real encontrado e corrigido: testado manualmente contra uma página de categoria
@@ -810,7 +898,7 @@ async function extrairCandidatosDeCategoria(urlCategoria: string, site: string, 
       const candidato = extrairCandidato(janela, url)
       if (candidato) candidatos.push(candidato)
     }
-    console.error('[real-comparaveis] categoria', urlCategoria, ': extraídos', candidatos.length, 'candidatos do HTML')
+    console.error('[real-comparaveis] categoria', urlCategoria, ': total', candidatos.length, 'candidatos do HTML (JSON-LD + href)')
     return candidatos
   } catch (err) {
     console.error('[real-comparaveis] categoria error', urlCategoria, String(err))
