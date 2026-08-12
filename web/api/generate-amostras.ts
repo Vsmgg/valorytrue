@@ -158,7 +158,26 @@ Gere o array "amostras" com uma entrada para cada um dos ${comparaveisReais.leng
     const comBody = resultado as unknown as Record<string, unknown>
     sanitizarUrlsAmostras(comBody, new Set(comparaveisReais.map((c) => c.url)))
 
-    return json({ amostras: comBody.amostras || [] })
+    const amostrasFinal = (comBody.amostras as unknown[] | undefined) || []
+    // Diagnóstico: a instrução pede "uma amostra pra CADA comparável, sem pular nenhum", mas
+    // isso depende da IA seguir à risca — nada aqui FORÇA a contagem batendo (forçar exigiria
+    // inventar uma amostra pra cobrir o buraco, o que violaria a regra de nunca inventar dado).
+    // Sem este log, um comparável real que a IA simplesmente pulou (ou cuja url ela devolveu
+    // errada, descartada por sanitizarUrlsAmostras) desaparece silenciosamente do total final,
+    // sem nenhum rastro de que existia. Não bloqueia a resposta — só torna a perda visível.
+    if (amostrasFinal.length !== comparaveisReais.length) {
+      console.error(
+        '[generate-amostras] IA devolveu',
+        amostrasFinal.length,
+        'amostra(s) de',
+        comparaveisReais.length,
+        'comparável(is) reais deste lote —',
+        comparaveisReais.length - amostrasFinal.length,
+        'perdido(s) (pulado pela IA ou url inválida)',
+      )
+    }
+
+    return json({ amostras: amostrasFinal })
   } catch {
     return json({ error: 'Não foi possível conectar à API do Gemini.' }, 502)
   }

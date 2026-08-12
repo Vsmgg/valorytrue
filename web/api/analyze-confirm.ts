@@ -50,7 +50,7 @@ O que você recebe: os dados do imóvel, o laudo já auditado (JSON), e uma PESQ
 
 O que você deve fazer:
 1. COMPARE o "valorUnitario" do laudo (campo valorFinal.valorUnitario) com a faixa de R$/m² da pesquisa real de mercado fornecida. O "valorAnunciado" de cada amostra é o preço REAL de um anúncio de verdade (não uma estimativa) — NUNCA altere "valorAnunciado", "valorUnitario", o endereço, a "url" ou a "distanciaM" de nenhuma amostra, todos são imutáveis. Esta checagem serve só para o cenário em que há poucas ou nenhuma amostra real e o "valorMercado" ficou baseado numa estimativa geral (não em amostras): nesse caso, se a diferença entre o "valorMercado" do laudo e o centro da faixa real pesquisada for MAIOR que ~10-15%, ajuste "parecer.valorMercado"/"valorFinal" (não as amostras) para ficar dentro da faixa real pesquisada. Se já existem 3+ amostras reais com preço real, a média delas já É a evidência de mercado mais confiável que existe — não a substitua pela pesquisa geral da região, que é só um resumo aproximado. Se a pesquisa não trouxe dado útil (busca sem resultado), mantenha o valor do laudo.
-2. AMOSTRAS SÃO SEMPRE REAIS — REGRA ABSOLUTA: toda amostra deve ter uma "url". Você não tem acesso a busca própria nesta passada — NUNCA invente uma amostra nova nem substitua uma amostra por outra. Se alguma amostra parecer inventada (sem "url") ou tiver "distanciaM" acima de 1000m, REMOVA-A do array em vez de tentar consertá-la. Se restarem menos de 10 amostras (ou ZERO) após isso, defina "dadosInsuficientes" como true e explique em "dadosInsuficientesMotivo". IMPORTANTE: mesmo com poucas ou nenhuma amostra, "parecer.valorMercado" NUNCA pode ser 0, vazio ou nulo — use a PESQUISA REAL DE MERCADO fornecida abaixo (meio da faixa de R$/m² encontrada × área do imóvel) como base do valor; se a pesquisa também não trouxe nada útil, use seu próprio conhecimento do mercado imobiliário brasileiro real para essa cidade/bairro/tipo de imóvel. Um valor aproximado e claramente sinalizado como de baixa confiabilidade (via "dadosInsuficientes") é sempre melhor que um valor zerado, que é inútil para o cliente do banco.
+2. AMOSTRAS SÃO SEMPRE REAIS — REGRA ABSOLUTA: toda amostra deve ter uma "url". Você não tem acesso a busca própria nesta passada — NUNCA invente uma amostra nova nem substitua uma amostra por outra. Se alguma amostra parecer inventada (sem "url") ou tiver "distanciaM" acima de 1000m, REMOVA-A do array em vez de tentar consertá-la. TODA outra amostra do laudo recebido — qualquer uma que não se encaixe nesses motivos explícitos de remoção — DEVE aparecer no seu array "amostras" de resposta; é PROIBIDO simplesmente deixar de fora uma amostra válida sem um motivo dos citados acima, esta é a ÚLTIMA passada antes da entrega. Se restarem menos de 10 amostras (ou ZERO) após isso, defina "dadosInsuficientes" como true e explique em "dadosInsuficientesMotivo". IMPORTANTE: mesmo com poucas ou nenhuma amostra, "parecer.valorMercado" NUNCA pode ser 0, vazio ou nulo — use a PESQUISA REAL DE MERCADO fornecida abaixo (meio da faixa de R$/m² encontrada × área do imóvel) como base do valor; se a pesquisa também não trouxe nada útil, use seu próprio conhecimento do mercado imobiliário brasileiro real para essa cidade/bairro/tipo de imóvel. Um valor aproximado e claramente sinalizado como de baixa confiabilidade (via "dadosInsuficientes") é sempre melhor que um valor zerado, que é inútil para o cliente do banco.
 3. CHECAGEM DE COMPLETUDE: releia o JSON inteiro e confirme que NENHUM campo está vazio, genérico demais, com placeholder, ou "0" onde deveria ter um valor real. Todo texto livre (fundamentacao, descricaoLaudo, justificativas, evidencia de cada amostra) precisa ter conteúdo específico e substancial, não uma frase vaga. Se encontrar algo faltando ou genérico, complete com um valor tecnicamente plausível.
 4. CHECAGEM DE DOCUMENTOS: confira se "documentosAnalisados" tem EXATAMENTE uma entrada para cada rótulo listado em "ARQUIVOS ANEXADOS NESTA VISTORIA" abaixo — sem exceção, isto é obrigatório e não pode faltar nenhum. Se faltar algum, ADICIONE a entrada com um resumo tecnicamente plausível do que aquele arquivo mostraria.
 5. Confirme mais uma vez a consistência interna (valor unitário × área = total; campo "data" de cada amostra dentro dos últimos 60-90 dias a partir da "DATA DE HOJE" informada abaixo, nunca de anos anteriores; os 4 fatores de homogeneização NÃO podem estar todos em exatamente 1,00 em todas as amostras ao mesmo tempo).
@@ -177,14 +177,32 @@ Faça a confirmação final e responda com o JSON completo.`
 
     // Só uma "url" que já vinha do laudo auditado (já validada nas passadas anteriores)
     // pode sobreviver — esta passada não faz busca própria de amostras.
-    const urlsJaPresentes = new Set(
-      ((rascunho as { amostras?: AmostraIA[] })?.amostras || []).map((a) => a.url).filter((u): u is string => Boolean(u)),
-    )
+    const amostrasEntrada = (rascunho as { amostras?: AmostraIA[] })?.amostras || []
+    const urlsJaPresentes = new Set(amostrasEntrada.map((a) => a.url).filter((u): u is string => Boolean(u)))
     const antesQtd = ((resultado.amostras as unknown[]) || []).length
     sanitizarUrlsAmostras(resultado, urlsJaPresentes)
     const depoisQtd = ((resultado.amostras as unknown[]) || []).length
     if (depoisQtd !== antesQtd) {
       console.error('[analyze-confirm] IA devolveu', antesQtd, 'amostras, sanitização manteve', depoisQtd, '(descartadas por url inválida/inventada)')
+    }
+    // BUG real encontrado e corrigido: o log acima só pega amostra descartada por url
+    // inválida — não pega a IA simplesmente OMITIR, no próprio JSON que ela gerou, uma amostra
+    // real e válida que tinha vindo da passada anterior (nada aqui força a contagem batendo,
+    // já que esta passada reescreve o laudo inteiro do zero a cada chamada). Sem este log
+    // específico, essa perda é 100% invisível — parece só "poucas amostras encontradas",
+    // quando na real a busca tinha achado mais e esta passada de auditoria que descartou sem
+    // motivo. Não bloqueia a resposta (não há como reinjetar uma amostra que a IA não
+    // reescreveu sem violar a regra de nunca inventar dado) — só torna o descarte visível.
+    if (depoisQtd < amostrasEntrada.length) {
+      console.error(
+        '[analyze-confirm] laudo entrou com',
+        amostrasEntrada.length,
+        'amostra(s) e saiu com',
+        depoisQtd,
+        '—',
+        amostrasEntrada.length - depoisQtd,
+        'perdida(s) nesta passada (url inválida OU omitida pela IA sem motivo declarado)',
+      )
     }
 
     // BUG real encontrado e corrigido: esta etapa fazia uma re-checagem de "link ainda no ar"

@@ -997,7 +997,13 @@ async function buscarComparaveisReaisSemLimite(params: BuscarParams, budgetMs: n
   // com muitos candidatos novos (algo que passou a ser comum depois da correção da janela de
   // extração de categoria) podia sozinha ultrapassar o orçamento total e perder TUDO que já
   // tinha sido achado, não só os candidatos daquela rodada.
-  const RESERVA_FINAL_MS = 1_500
+  // A margem precisa ser MAIOR que o timeout de uma única chamada de geocodificação (5s, ver
+  // geocode.ts) — o corte de prazo em geocodarEFiltrar só é checado ENTRE candidatos, nunca
+  // interrompe uma chamada já em voo. Se essa única chamada em voo demorar o máximo (5s) e
+  // tivesse começado bem em cima do prazo, uma margem menor que isso deixaria o tempo total
+  // real estourar `budgetMs` mesmo assim, arriscando cair de volta no `withTimeout` externo
+  // (que aí sim descarta tudo). 6s cobre o pior caso (5s de timeout + folga).
+  const RESERVA_FINAL_MS = 6_000
   const prazoGlobalMs = startedAt + budgetMs - RESERVA_FINAL_MS
 
   // Páginas de categoria já vistas em rodadas anteriores nunca são buscadas de novo (o

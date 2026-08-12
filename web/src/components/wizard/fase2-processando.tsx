@@ -151,21 +151,38 @@ export function Fase2Processando({ input, onComplete }: Fase2Props) {
         const TAMANHO_LOTE_AMOSTRAS = 8
         let amostrasProntas: Amostra[] = []
         let algumLoteFuncionou = false
+        // BUG real encontrado e corrigido: uma falha de rede/502 isolada num ÚNICO lote (8
+        // comparáveis reais) descartava o lote inteiro em silêncio, sem tentar de novo — o
+        // "buscaResumo" mostrado na Fase 3 continua contando esses comparáveis como
+        // "encontrados", então o usuário via um número de amostras bem menor do que o total
+        // exibido, sem nenhuma pista do motivo. Uma tentativa extra cobre a maioria das falhas
+        // transitórias (a causa mais comum de um lote falhar sozinho enquanto os outros
+        // funcionam); se as duas falharem, ao menos fica registrado no console pra
+        // diagnosticar.
+        const MAX_TENTATIVAS_POR_LOTE = 2
         for (let i = 0; i < comparaveisReais.length; i += TAMANHO_LOTE_AMOSTRAS) {
           const lote = comparaveisReais.slice(i, i + TAMANHO_LOTE_AMOSTRAS)
-          try {
-            const resLote = await fetch('/api/generate-amostras', {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ propertyData: input.propertyData, comparaveisReais: lote }),
-            })
-            const dataLote = (await resLote.json().catch(() => ({}))) as { amostras?: Amostra[] }
-            if (resLote.ok && Array.isArray(dataLote.amostras)) {
-              amostrasProntas = [...amostrasProntas, ...dataLote.amostras]
-              algumLoteFuncionou = true
+          let sucesso = false
+          for (let tentativa = 1; tentativa <= MAX_TENTATIVAS_POR_LOTE && !sucesso; tentativa++) {
+            try {
+              const resLote = await fetch('/api/generate-amostras', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ propertyData: input.propertyData, comparaveisReais: lote }),
+              })
+              const dataLote = (await resLote.json().catch(() => ({}))) as { amostras?: Amostra[]; error?: string }
+              if (resLote.ok && Array.isArray(dataLote.amostras)) {
+                amostrasProntas = [...amostrasProntas, ...dataLote.amostras]
+                algumLoteFuncionou = true
+                sucesso = true
+              } else if (tentativa === MAX_TENTATIVAS_POR_LOTE) {
+                console.error('[fase2] lote de amostras falhou após', tentativa, 'tentativa(s):', dataLote.error || resLote.status, '—', lote.length, 'comparável(is) real(is) perdido(s)')
+              }
+            } catch (err) {
+              if (tentativa === MAX_TENTATIVAS_POR_LOTE) {
+                console.error('[fase2] lote de amostras falhou após', tentativa, 'tentativa(s) (erro de rede):', err, '—', lote.length, 'comparável(is) real(is) perdido(s)')
+              }
             }
-          } catch {
-            // segue pro próximo lote — uma falha isolada não derruba o resto
           }
         }
         // Só manda "amostrasProntas" se pelo menos 1 lote funcionou (ou se não havia

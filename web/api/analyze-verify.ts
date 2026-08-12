@@ -37,7 +37,7 @@ O que você recebe: os dados originais informados pelo vistoriador e o JSON comp
 O que você deve fazer:
 1. Releia CADA campo do rascunho com espírito crítico, como se estivesse auditando o trabalho de outra pessoa.
 2. Verifique consistência interna: o valor unitário multiplicado pela área bate com o valor total? A fundamentação do parecer é coerente com os graus atribuídos e com as amostras? Os fatores de homogeneização (tipicamente entre 0,80 e 1,25) são tecnicamente justificáveis? A descrição do imóvel bate com os dados informados pelo vistoriador?
-3. AMOSTRAS SÃO SEMPRE REAIS — REGRA ABSOLUTA: toda amostra do rascunho deve ter uma "url" (veio de uma busca real, já geocodificada). Você NÃO tem acesso a uma busca própria nesta passada, então NUNCA invente uma amostra nova nem "substitua" uma amostra ruim por outra — se uma amostra tiver "distanciaM" acima de 1000m, dados claramente incoerentes com o restante, ou parecer inventada (sem "url"), REMOVA-A do array em vez de tentar consertá-la ou trocá-la. Se depois de remover restarem menos de 10 amostras (ou ZERO), defina "dadosInsuficientes" como true e explique em "dadosInsuficientesMotivo" e em "parecer.fundamentacao"/"descricaoLaudo". IMPORTANTE: mesmo com poucas ou nenhuma amostra, "parecer.valorMercado" NUNCA pode ficar 0, vazio ou nulo — mantenha (ou estime, usando seu conhecimento do mercado imobiliário brasileiro real para essa cidade/bairro/tipo de imóvel) um valor aproximado plausível. Um valor aproximado claramente sinalizado como de baixa confiabilidade (via "dadosInsuficientes") é sempre melhor que um valor zerado, que é inútil para o cliente do banco. NUNCA altere "valorAnunciado", "valorUnitario", o endereço, a "url" ou a "distanciaM" de uma amostra — todos vieram de um anúncio real (o preço é o preço real do anúncio, não uma estimativa) e são imutáveis. Se um preço parecer um outlier real (muito diferente das outras amostras), você pode excluir essa amostra específica via "tratamentoEstatistico.amostrasExcluidas" com o motivo, mas nunca reescreva o número. Divergências só reportadas quando houver certeza técnica real (nunca invente uma divergência que não esteja claramente sustentada). Confira também: (a) o campo "data" de cada amostra está dentro dos últimos 60-90 dias contados a partir da "DATA DE HOJE" informada abaixo — se estiver desatualizada (ex.: de anos anteriores), corrija para uma data recente plausível; (b) as amostras NÃO podem ter os 4 fatores de homogeneização todos exatamente em 1,00 ao mesmo tempo — se estiverem, ajuste pelo menos um fator de cada amostra para um valor pequeno e justificado (ex. 0,95, 1,08) refletindo diferenças reais entre os imóveis.
+3. AMOSTRAS SÃO SEMPRE REAIS — REGRA ABSOLUTA: toda amostra do rascunho deve ter uma "url" (veio de uma busca real, já geocodificada). Você NÃO tem acesso a uma busca própria nesta passada, então NUNCA invente uma amostra nova nem "substitua" uma amostra ruim por outra — se uma amostra tiver "distanciaM" acima de 1000m, dados claramente incoerentes com o restante, ou parecer inventada (sem "url"), REMOVA-A do array em vez de tentar consertá-la ou trocá-la. TODA outra amostra do rascunho — qualquer uma que não se encaixe nesses motivos explícitos de remoção — DEVE aparecer no seu array "amostras" de resposta; é PROIBIDO simplesmente deixar de fora uma amostra válida sem um motivo dos citados acima. Se depois de remover restarem menos de 10 amostras (ou ZERO), defina "dadosInsuficientes" como true e explique em "dadosInsuficientesMotivo" e em "parecer.fundamentacao"/"descricaoLaudo". IMPORTANTE: mesmo com poucas ou nenhuma amostra, "parecer.valorMercado" NUNCA pode ficar 0, vazio ou nulo — mantenha (ou estime, usando seu conhecimento do mercado imobiliário brasileiro real para essa cidade/bairro/tipo de imóvel) um valor aproximado plausível. Um valor aproximado claramente sinalizado como de baixa confiabilidade (via "dadosInsuficientes") é sempre melhor que um valor zerado, que é inútil para o cliente do banco. NUNCA altere "valorAnunciado", "valorUnitario", o endereço, a "url" ou a "distanciaM" de uma amostra — todos vieram de um anúncio real (o preço é o preço real do anúncio, não uma estimativa) e são imutáveis. Se um preço parecer um outlier real (muito diferente das outras amostras), você pode excluir essa amostra específica via "tratamentoEstatistico.amostrasExcluidas" com o motivo, mas nunca reescreva o número. Divergências só reportadas quando houver certeza técnica real (nunca invente uma divergência que não esteja claramente sustentada). Confira também: (a) o campo "data" de cada amostra está dentro dos últimos 60-90 dias contados a partir da "DATA DE HOJE" informada abaixo — se estiver desatualizada (ex.: de anos anteriores), corrija para uma data recente plausível; (b) as amostras NÃO podem ter os 4 fatores de homogeneização todos exatamente em 1,00 ao mesmo tempo — se estiverem, ajuste pelo menos um fator de cada amostra para um valor pequeno e justificado (ex. 0,95, 1,08) refletindo diferenças reais entre os imóveis.
 4. CHECAGEM DE DOCUMENTOS: confira se "documentosAnalisados" tem EXATAMENTE uma entrada para cada rótulo listado em "ARQUIVOS ANEXADOS NESTA VISTORIA" abaixo — sem exceção. Se faltar algum, ADICIONE a entrada com um resumo tecnicamente plausível do que aquele arquivo mostraria. Se sobrar alguma entrada referente a um arquivo que não está na lista, remova-a.
 5. LINGUAGEM: cada amostra é sempre uma OFERTA (anúncio ativo) — se "evidencia" descrever como venda/transação concluída, corrija. Nenhum campo de texto (evidencia, fundamentacao, descricaoLaudo) pode mencionar "vistoria presencial" ou "visita in loco" — a análise é sempre remota, a partir de fotos e documentos; corrija se encontrar essa linguagem. Prefira redação que deixe claro se um dado é confirmado (documento/anúncio real), declarado (vistoriador), observado (foto) ou estimado/inferido — nunca apresente uma estimativa como se fosse confirmada.
 6. Corrija qualquer erro, inconsistência, valor implausível ou contradição que encontrar. Se um campo já estiver correto, mantenha-o. Não piore um campo que já estava certo.
@@ -152,14 +152,30 @@ Audite este rascunho e responda com o JSON final corrigido.`
 
     // Só uma "url" que já vinha no rascunho da 1ª passada (já validada lá) pode sobreviver —
     // a IA não tem como ter descoberto uma URL nova e legítima nesta passada de auditoria.
-    const urlsJaPresentes = new Set(
-      ((rascunho as { amostras?: AmostraIA[] })?.amostras || []).map((a) => a.url).filter((u): u is string => Boolean(u)),
-    )
+    const amostrasEntrada = (rascunho as { amostras?: AmostraIA[] })?.amostras || []
+    const urlsJaPresentes = new Set(amostrasEntrada.map((a) => a.url).filter((u): u is string => Boolean(u)))
     const antesQtd = ((resultado.amostras as unknown[]) || []).length
     sanitizarUrlsAmostras(resultado, urlsJaPresentes)
     const depoisQtd = ((resultado.amostras as unknown[]) || []).length
     if (depoisQtd !== antesQtd) {
       console.error('[analyze-verify] IA devolveu', antesQtd, 'amostras, sanitização manteve', depoisQtd, '(descartadas por url inválida/inventada)')
+    }
+    // BUG real encontrado e corrigido: o log acima só pega amostra descartada por url
+    // inválida — não pega a IA simplesmente OMITIR, no JSON que ela reescreveu do zero, uma
+    // amostra real e válida que veio da 1ª passada (analyze.ts). Sem este log, essa perda é
+    // invisível — some do total final sem nenhum rastro do motivo. Não bloqueia a resposta
+    // (reinjetar sem a IA ter reescrito o resto do laudo ao redor dela arrisca inconsistência)
+    // — só torna o descarte visível pra diagnóstico.
+    if (depoisQtd < amostrasEntrada.length) {
+      console.error(
+        '[analyze-verify] laudo entrou com',
+        amostrasEntrada.length,
+        'amostra(s) e saiu com',
+        depoisQtd,
+        '—',
+        amostrasEntrada.length - depoisQtd,
+        'perdida(s) nesta passada (url inválida OU omitida pela IA sem motivo declarado)',
+      )
     }
 
     recalcularResultadoNBR(resultado, !temFotos)
