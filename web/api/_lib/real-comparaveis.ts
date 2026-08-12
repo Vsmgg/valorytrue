@@ -472,15 +472,34 @@ async function buscarPaginaCategoriaPorCep(
       return null
     }
     const data = (await res.json()) as {
-      candidates?: { groundingMetadata?: { groundingChunks?: GroundingChunk[] } }[]
+      candidates?: { content?: { parts?: { text?: string }[] }; groundingMetadata?: { groundingChunks?: GroundingChunk[] } }[]
     }
     const chunks = data.candidates?.[0]?.groundingMetadata?.groundingChunks || []
     // As URLs do grounding vêm sempre como link de redirecionamento do Google — resolve antes
     // de checar o domínio (ver resolverRedirecionamentoGemini).
     const brutas = chunks.map((c) => c.web?.uri).filter((u): u is string => Boolean(u))
     const resolvidas = await Promise.all(brutas.map((u) => resolverRedirecionamentoGemini(u)))
-    const achada = resolvidas.find((u) => urlPertenceAPortalConhecido(u))
-    console.error('[real-comparaveis] categoria-por-cep', site, ':', achada || 'nenhuma URL do portal encontrada')
+    let achada = resolvidas.find((u) => urlPertenceAPortalConhecido(u))
+    // Fallback: o texto da RESPOSTA da IA (não os chunks de grounding) foi pedido explicitamente
+    // pra ser só a URL — às vezes o grounding não gera um chunk pro resultado que a IA de fato
+    // usou pra responder (confirmado via teste real: grounding trouxe 0 chunks no domínio certo
+    // em duas regiões bem diferentes, mesmo com resultado plausível), mas o texto puro da
+    // resposta ainda pode conter uma URL válida e real (o Google Search grounding não inventa
+    // URLs fora do que a busca encontrou, só a citação via chunk que às vezes falha).
+    if (!achada) {
+      const textoResposta = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? '').join('') || ''
+      const matchUrl = textoResposta.match(/https?:\/\/\S+/)
+      if (matchUrl) {
+        const resolvidaDoTexto = await resolverRedirecionamentoGemini(matchUrl[0].replace(/[.,;)\]]+$/, ''))
+        if (urlPertenceAPortalConhecido(resolvidaDoTexto)) achada = resolvidaDoTexto
+      }
+    }
+    console.error(
+      '[real-comparaveis] categoria-por-cep',
+      site,
+      ':',
+      achada || `nenhuma URL do portal encontrada (${chunks.length} chunk(s) de grounding, ${brutas.length} url(s) bruta(s))`,
+    )
     return achada ?? null
   } catch (err) {
     console.error('[real-comparaveis] categoria-por-cep error', site, String(err))

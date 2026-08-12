@@ -199,7 +199,7 @@ ${
             `- ${c.endereco}${c.areaM2 ? ` (${c.areaM2} m²)` : ''}${c.distanciaM !== null ? `, a ${c.distanciaM}m do imóvel avaliado (distância real calculada)` : ''} — Preço real do anúncio: R$ ${c.valorAnunciado} — URL: ${c.url}`,
         )
         .join('\n')}`
-    : '\nCOMPARÁVEIS REAIS ENCONTRADOS NA INTERNET: nenhum encontrado num raio de até 1000m. NÃO invente comparáveis — "comparaveis" deve ser [] e "dadosInsuficientes" deve ser true.'
+    : '\nCOMPARÁVEIS REAIS ENCONTRADOS NA INTERNET: nenhum encontrado dentro do raio de busca configurado. NÃO invente comparáveis — "comparaveis" deve ser [] e "dadosInsuficientes" deve ser true.'
 }
 
 Gere a estimativa de valor (AVM) deste imóvel.`

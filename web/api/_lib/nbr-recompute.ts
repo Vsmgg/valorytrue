@@ -127,7 +127,13 @@ export function recalcularResultadoNBR(resultado: Record<string, unknown>, semFo
     // false mesmo com poucas amostras.
     resultado.dadosInsuficientes = amostrasHomogeneizadas.length < 10
     if (resultado.dadosInsuficientes && !resultado.dadosInsuficientesMotivo) {
-      resultado.dadosInsuficientesMotivo = `Apenas ${amostrasHomogeneizadas.length} amostra(s) real(is) encontrada(s) num raio de até 1000m do imóvel — abaixo do mínimo de 10 amostras exigido para uma precificação confiável pelo método comparativo direto.`
+      // BUG real encontrado e corrigido: o texto dizia sempre "num raio de até 1000m", mas o
+      // raio real de busca varia por tipo de imóvel (1000m pra tipos densos, 2000m pra tipos de
+      // baixa densidade — ver RAIO_BAIXA_DENSIDADE_M em real-comparaveis.ts). Esta função não
+      // recebe o tipo do imóvel, então não tem como saber qual raio foi de fato usado — melhor
+      // não afirmar um número que pode estar errado do que informar um valor impreciso num
+      // laudo formal.
+      resultado.dadosInsuficientesMotivo = `Apenas ${amostrasHomogeneizadas.length} amostra(s) real(is) encontrada(s) dentro do raio de busca configurado para este tipo de imóvel — abaixo do mínimo de 10 amostras exigido para uma precificação confiável pelo método comparativo direto.`
     }
 
     // --- Ancora o valor final matematicamente na média das amostras homogeneizadas ---

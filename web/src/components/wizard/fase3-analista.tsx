@@ -263,7 +263,7 @@ export function Fase3Analista({ resultado: initialResultado, onApprove }: Fase3P
               </div>
             )}
             {current.amostras.length === 0 ? (
-              <p className="mt-4 text-[13px] text-muted italic">Nenhuma amostra real foi encontrada num raio de até 1000m deste imóvel.</p>
+              <p className="mt-4 text-[13px] text-muted italic">Nenhuma amostra real foi encontrada dentro do raio de busca deste imóvel.</p>
             ) : (
             <div className="mt-4 overflow-x-auto">
               <table className="w-full text-[12.5px]">
