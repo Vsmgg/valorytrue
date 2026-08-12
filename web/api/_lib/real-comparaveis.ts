@@ -776,14 +776,6 @@ ${escopo}
 Para cada anúncio encontrado, escreva uma linha própria com o endereço (rua e número quando divulgados no anúncio, ou o nome do condomínio/empreendimento quando a rua não for divulgada — comum em casas de condomínio fechado), o PREÇO DE VENDA em R$ e a área em m². O preço é obrigatório — se uma página não tiver um preço de venda claro de uma unidade específica, não a inclua. Seja direto, sem introdução.`
 }
 
-/** O mecanismo de busca programável (Custom Search Engine) já está configurado, no painel do
- * Google, pra restringir a busca aos portais imobiliários — não precisa repetir "site:" aqui.
- * A consulta só precisa do endereço e do tipo de imóvel; o Google cuida do resto. */
-// "-aluguel -alugar" exclui resultados de locação — confirmado via teste real que sem isso a
-// busca trazia anúncios de ALUGUEL junto com os de venda (ex.: "sala comercial ... aluguel
-// R$70.200"), que nunca servem de amostra pro método comparativo direto de VALOR DE VENDA.
-const SUFIXO_QUERY = '-aluguel -alugar'
-
 /** Extrai "rua + número" do endereço completo montado pelo chamador (formato
  * "Rua X, número, Bairro, Cidade - UF") no formato "Rua X, número" — usado como referência pra
  * preencher o endereço de um candidato de categoria que não menciona a própria rua (ver

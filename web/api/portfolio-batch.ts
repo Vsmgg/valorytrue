@@ -107,6 +107,10 @@ export default async function handler(request: Request) {
           responseSchema,
         },
       }),
+      // Rede de segurança: sem isso, estourar o tempo é a Vercel matando a função com um erro
+      // genérico, em vez de um erro tratável (mesmo padrão aplicado a todo o resto do pipeline
+      // depois de confirmado em produção que analyze-verify.ts sofria exatamente disso).
+      signal: AbortSignal.timeout(23_000),
     })
 
     const data = (await geminiRes.json()) as {

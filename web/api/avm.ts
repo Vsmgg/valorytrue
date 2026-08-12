@@ -292,6 +292,10 @@ Gere a estimativa de valor (AVM) deste imóvel.`
           responseSchema,
         },
       }),
+      // Rede de segurança: sem isso, estourar o tempo aqui é a Vercel matando a função com um
+      // erro genérico e não-recuperável (confirmado em produção acontecendo em analyze-verify.ts,
+      // o equivalente deste módulo no Empresa Avaliadora), em vez de eu devolver um erro tratável.
+      signal: AbortSignal.timeout(23_000),
     })
 
     const data = (await geminiRes.json()) as {
