@@ -41,11 +41,10 @@ export function AvmClienteFinal() {
       // Espelhado com src/components/wizard/fase2-processando.tsx — mesmo teto de chamadas/
       // tempo, mesmo uso de `proximoOffsetBase` devolvido por /api/find-amostras (em vez de um
       // passo fixo `chamada * 10`, que deixava páginas de resultado nunca consultadas a cada
-      // transição de chamada). Teto de 15 (não mais 20): confirmado via log real que a busca por
-      // bairro pode acumular 30+ comparáveis, e /api/avm gera tudo numa ÚNICA chamada ao Gemini
-      // (sem lotes) — um volume grande demais arrisca o mesmo "TimeoutError" que derrubou
-      // analyze-verify.ts no módulo Empresa Avaliadora.
-      const ALVO_AMOSTRAS_FRONTEND = 15
+      // transição de chamada). Teto de 10 (não mais 15/20): confirmado via log real repetidas
+      // vezes que volumes maiores causam TimeoutError de forma consistente (não ocasional) na
+      // chamada ao Gemini — 10 é o próprio mínimo técnico, corta exatamente nele.
+      const ALVO_AMOSTRAS_FRONTEND = 10
       const MAX_CHAMADAS_BUSCA = 10
       const TEMPO_MAX_BUSCA_MS = 300_000
       let comparaveisReais: ComparavelReal[] = []

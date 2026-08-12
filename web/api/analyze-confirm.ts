@@ -57,6 +57,7 @@ O que você deve fazer:
 6. LINGUAGEM FINAL: cada amostra é sempre uma OFERTA (anúncio ativo), nunca descreva como venda/transação concluída. Nenhum campo de texto (evidencia, fundamentacao, descricaoLaudo) pode mencionar "vistoria presencial" ou "visita in loco" — esta plataforma sempre analisa remotamente, a partir de fotos e documentos enviados; corrija se encontrar essa linguagem, pois esta é a última passada antes da entrega ao cliente do banco.
 7. Corrija o que precisar. Se já estiver tudo certo, mantenha.
 8. Responda com o JSON COMPLETO e FINAL — esta versão vai direto para o cliente do banco, sem mais revisões depois dela. O array "amostras" da sua resposta deve conter SOMENTE amostras que já vinham no laudo recebido (mesma "url") — nunca uma nova.
+9. VELOCIDADE: quando um campo de texto (evidencia, justificativa de um fator, fundamentacao, descricaoLaudo etc.) já estiver correto, REPRODUZA-O EXATAMENTE como veio no laudo recebido, palavra por palavra — NUNCA reescreva ou reformule um texto só por estilo quando o conteúdo já está certo. Quando precisar corrigir um texto, a correção deve ser CURTA e direta (no máximo ~20 palavras), nunca uma reescrita longa. Isto é obrigatório para o processamento caber no tempo disponível.
 
 Responda SOMENTE com o JSON do schema, sem nenhum texto fora dele.`
 

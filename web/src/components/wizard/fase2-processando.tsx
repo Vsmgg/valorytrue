@@ -97,14 +97,15 @@ export function Fase2Processando({ input, onComplete }: Fase2Props) {
         // quantidade boa de amostras reais ou esgotar o tempo total que vale a pena gastar
         // aqui. Uma falha em qualquer chamada não é fatal — /api/analyze busca por conta
         // própria se receber uma lista vazia.
-        // BUG real encontrado e corrigido: com a busca por bairro (muito mais eficaz), o alvo de
-        // 20 deixou de ser um teto realista — confirmado via log real de produção que uma busca
-        // acumulou 32 comparáveis reais (4 lotes de 8), e a passada de verificação seguinte
-        // (analyze-verify.ts, que reescreve a lista de amostras inteira a cada chamada) estourou
-        // o tempo do servidor e falhou com "TimeoutError". Uma busca com só 16 comparáveis (2
-        // lotes) no mesmo dia funcionou normalmente. 15 dá folga confortável acima do mínimo de
-        // 10 exigido, sem sobrecarregar as passadas seguintes.
-        const ALVO_AMOSTRAS_FRONTEND = 15
+        // BUG real encontrado e corrigido: com a busca por bairro (muito mais eficaz), 20 e
+        // depois 15 deixaram de ser tetos seguros — confirmado via log real de produção
+        // repetidas vezes: 32 comparáveis (4 lotes) falhou, ~16 (2 lotes) falhou com
+        // TimeoutError DUAS VEZES SEGUIDAS mesmo já com nova tentativa automática (não é falta
+        // de sorte, é o volume de dados que não cabe no tempo do servidor de forma consistente).
+        // 10 é o próprio mínimo técnico exigido — corta o alvo exatamente nele: garante que a
+        // passada de verificação (analyze-verify.ts, que reescreve a lista de amostras inteira
+        // a cada chamada) sempre recebe o menor volume possível que ainda atende ao requisito.
+        const ALVO_AMOSTRAS_FRONTEND = 10
         const MAX_CHAMADAS_BUSCA = 10
         const TEMPO_MAX_BUSCA_MS = 300_000
         let comparaveisReais: ComparavelReal[] = []
