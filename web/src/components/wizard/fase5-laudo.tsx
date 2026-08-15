@@ -42,7 +42,7 @@ export function Fase5Laudo({ propertyData, resultado, photos, documents }: Fase5
         setNarrativeText(texto)
       }
       const { downloadLaudoPdf } = await import('@/lib/pdf')
-      await downloadLaudoPdf(texto, 'Laudo de Avaliação Imobiliária', { photos, documents })
+      await downloadLaudoPdf(texto, 'Laudo de Avaliação Imobiliária', { photos, documents }, resultado.amostras)
       setDone(true)
     } catch {
       setError('Não foi possível conectar ao motor de geração do laudo.')

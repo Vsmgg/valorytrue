@@ -265,7 +265,7 @@ ESTRUTURA DO DOCUMENTO — siga esta ordem, cada título de seção em UMA LINHA
 16. FONTES E LINKS DAS AMOSTRAS (repita todos os links, um por linha)
 17. TRATAMENTO DOS DADOS
 18. HOMOGENEIZAÇÃO
-19. MEMÓRIA DE CÁLCULO (por amostra: valor original → fatores aplicados → valor homogeneizado)
+19. MEMÓRIA DE CÁLCULO (escreva SÓ um parágrafo curto de 1-2 frases explicando o método de cálculo — valor original de cada amostra multiplicado pelos fatores de homogeneização resulta no valor unitário homogeneizado. NÃO liste as amostras uma a uma aqui — o documento final insere uma tabela real logo depois desse parágrafo com os números de cada amostra, então repetir os valores em texto seria redundante)
 20. ANÁLISE ESTATÍSTICA
 21. DETERMINAÇÃO DO VALOR
 22. ANÁLISE DE LIQUIDEZ (classificação e, se possível, prazo estimado de comercialização; nunca confunda valor de mercado com valor de liquidação forçada)

@@ -69,6 +69,13 @@ export function extractDocumentText(text: string): { title: string; body: string
   return { title, body }
 }
 
+export interface MemoriaCalculoAmostra {
+  id: string
+  valorUnitario: number
+  valorUnitarioHomogeneizado: number
+  fatoresAplicados: { fator: string; valor: number }[]
+}
+
 export interface LaudoAttachment {
   label: string
   url: string
@@ -155,7 +162,12 @@ function triggerDownload(bytes: Uint8Array, filename: string) {
   URL.revokeObjectURL(url)
 }
 
-export async function downloadLaudoPdf(text: string, title = 'Minuta gerada pelo Assistente de IA', attachments?: LaudoAttachments) {
+export async function downloadLaudoPdf(
+  text: string,
+  title = 'Minuta gerada pelo Assistente de IA',
+  attachments?: LaudoAttachments,
+  amostras?: MemoriaCalculoAmostra[],
+) {
   const { jsPDF } = await import('jspdf')
   const doc = new jsPDF({ unit: 'pt', format: 'a4' })
   let y = 0
@@ -194,6 +206,95 @@ export async function downloadLaudoPdf(text: string, title = 'Minuta gerada pelo
     drawHeader()
   }
 
+  /** Desenha a memória de cálculo como uma grade real (colunas fixas, cabeçalho, linhas
+   * alternadas) em vez de texto corrido — pedido explícito do usuário ("como se fosse em
+   * Excel"). Usa os números REAIS de `amostras` (mesma fonte que alimenta o resultado
+   * estruturado, nunca o texto que a IA escreveu pra essa seção) — elimina qualquer risco de a
+   * IA errar ou arredondar um número ao transcrever, e resolve de vez o problema de caracteres
+   * que a fonte padrão do jsPDF não sabe desenhar (setas "→", pipes "|" etc. viravam "!" ou
+   * lixo visual no texto livre). */
+  const drawMemoriaCalculoTable = (dados: MemoriaCalculoAmostra[]) => {
+    const colunas = [
+      { header: 'Amostra', width: 48, align: 'left' as const },
+      { header: 'Localização', width: 62, align: 'right' as const },
+      { header: 'Padrão constr.', width: 62, align: 'right' as const },
+      { header: 'Conservação', width: 62, align: 'right' as const },
+      { header: 'Oferta', width: 62, align: 'right' as const },
+      { header: 'Valor original R$/m²', width: 90, align: 'right' as const },
+      { header: 'Valor homog. R$/m²', width: 97, align: 'right' as const },
+    ]
+    const totalWidth = colunas.reduce((s, c) => s + c.width, 0)
+    const rowHeight = 20
+    const headerHeight = 24
+
+    const fatorDe = (a: MemoriaCalculoAmostra, nome: string) => {
+      const f = a.fatoresAplicados.find((f) => f.fator.toLowerCase().includes(nome))
+      return f ? f.valor.toFixed(2) : '—'
+    }
+
+    const drawHeaderRow = () => {
+      doc.setFillColor(BRAND.r, BRAND.g, BRAND.b)
+      doc.rect(MARGIN, y, totalWidth, headerHeight, 'F')
+      doc.setFont('helvetica', 'bold')
+      doc.setFontSize(8)
+      doc.setTextColor(255, 255, 255)
+      let x = MARGIN
+      for (const col of colunas) {
+        const lines = doc.splitTextToSize(col.header, col.width - 8)
+        const startTextY = y + headerHeight / 2 - ((lines.length - 1) * 8) / 2 + 3
+        lines.forEach((l: string, i: number) => {
+          doc.text(l, col.align === 'right' ? x + col.width - 4 : x + 4, startTextY + i * 8, {
+            align: col.align,
+          })
+        })
+        x += col.width
+      }
+      y += headerHeight
+    }
+
+    if (y + headerHeight + rowHeight > PAGE_HEIGHT - MARGIN - 20) newPage()
+    drawHeaderRow()
+
+    doc.setFont('helvetica', 'normal')
+    doc.setFontSize(8)
+    dados.forEach((a, i) => {
+      if (y + rowHeight > PAGE_HEIGHT - MARGIN - 20) {
+        newPage()
+        drawHeaderRow()
+        doc.setFont('helvetica', 'normal')
+        doc.setFontSize(8)
+      }
+      if (i % 2 === 1) {
+        doc.setFillColor(244, 246, 250)
+        doc.rect(MARGIN, y, totalWidth, rowHeight, 'F')
+      }
+      doc.setDrawColor(225, 228, 234)
+      doc.rect(MARGIN, y, totalWidth, rowHeight)
+      const valores = [
+        a.id,
+        fatorDe(a, 'localiza'),
+        fatorDe(a, 'padr'),
+        fatorDe(a, 'conserva'),
+        fatorDe(a, 'oferta'),
+        a.valorUnitario.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+        a.valorUnitarioHomogeneizado.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+      ]
+      let x = MARGIN
+      doc.setTextColor(INK.r, INK.g, INK.b)
+      valores.forEach((cell, ci) => {
+        const col = colunas[ci]
+        doc.line(x, y, x, y + rowHeight)
+        doc.text(cell, col.align === 'right' ? x + col.width - 4 : x + 4, y + rowHeight / 2 + 3, {
+          align: col.align,
+        })
+        x += col.width
+      })
+      doc.line(x, y, x, y + rowHeight)
+      y += rowHeight
+    })
+    y += 14
+  }
+
   drawHeader()
 
   doc.setFont('helvetica', 'bold')
@@ -214,6 +315,15 @@ export async function downloadLaudoPdf(text: string, title = 'Minuta gerada pelo
   doc.setFontSize(bodyFontSize)
 
   const rawLines = text.split('\n')
+  // Título da seção 19 do prompt narrativo ("MEMÓRIA DE CÁLCULO") — ver
+  // api/generate-laudo-narrativo.ts. Detectado pelo mesmo heurístico de isSectionTitle (ignora
+  // a numeração "19."), então funciona mesmo se a IA variar o texto ao redor do título.
+  const ehTituloMemoriaCalculo = (linhaLimpa: string) => /MEM[ÓO]RIA\s*DE\s*C[ÁA]LCULO/i.test(linhaLimpa)
+  // true entre o título "MEMÓRIA DE CÁLCULO" e o próximo título de seção — a tabela real é
+  // inserida assim que a seção termina (bem depois do parágrafo curto que a IA escreve ali,
+  // ver o prompt), e qualquer bullet nesse meio-tempo é ignorado (a IA foi instruída a não
+  // listar as amostras aqui, mas se listar mesmo assim, o bullet não duplica a tabela).
+  let dentroDaMemoriaCalculo = false
 
   for (const rawLine of rawLines) {
     const trimmed = rawLine.trim()
@@ -226,6 +336,14 @@ export async function downloadLaudoPdf(text: string, title = 'Minuta gerada pelo
     const isBullet = trimmed.startsWith('- ') || trimmed.startsWith('* ')
     const content = isBullet ? trimmed.slice(2) : trimmed
     const isTitle = !isBullet && isSectionTitle(trimmed)
+
+    if (isTitle && dentroDaMemoriaCalculo && amostras && amostras.length > 0) {
+      if (y + 44 > PAGE_HEIGHT - MARGIN - 20) newPage()
+      drawMemoriaCalculoTable(amostras)
+      dentroDaMemoriaCalculo = false
+    }
+
+    if (dentroDaMemoriaCalculo && isBullet) continue
 
     doc.setFont('helvetica', isTitle ? 'bold' : 'normal')
     doc.setFontSize(isTitle ? 11 : bodyFontSize)
@@ -247,6 +365,15 @@ export async function downloadLaudoPdf(text: string, title = 'Minuta gerada pelo
     }
 
     if (isTitle) y += 4
+
+    if (isTitle && ehTituloMemoriaCalculo(content)) dentroDaMemoriaCalculo = true
+  }
+
+  // Se a memória de cálculo for a ÚLTIMA seção do documento (sem título seguinte pra disparar
+  // a inserção acima), desenha a tabela no final mesmo assim.
+  if (dentroDaMemoriaCalculo && amostras && amostras.length > 0) {
+    if (y + 44 > PAGE_HEIGHT - MARGIN - 20) newPage()
+    drawMemoriaCalculoTable(amostras)
   }
 
   drawFooter()
