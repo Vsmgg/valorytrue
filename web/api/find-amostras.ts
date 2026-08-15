@@ -1,7 +1,18 @@
 import { buscarComparaveisReais } from './_lib/real-comparaveis.js'
 import { getUserFromRequest } from './_lib/auth.js'
 
-export const config = { runtime: 'edge' }
+// BUG real encontrado e corrigido: uma tentativa anterior de sair do Edge Function (limite
+// fixo de ~25s, sem exceção) tentando só remover `runtime: 'edge'` e manter o formato antigo
+// `export default async function handler(request: Request)` quebrou a produção — a Vercel
+// passa um objeto de requisição no estilo Node.js legado (sem `.headers.get()`) pra esse
+// formato de export quando não é Edge, incompatível com getUserFromRequest (que espera um
+// Request padrão da Web). A correção certa, confirmada na documentação oficial da Vercel: usar
+// o formato "Web Handler" (`export default { fetch(request) }`) — aí sim a Vercel garante um
+// Request/Response padrão da Web mesmo em runtime Node.js, sem precisar mudar nada em
+// getUserFromRequest ou em `request.json()`. Function Node.js no plano atual já tem até 300s
+// por padrão (Fluid Compute) — 60s aqui já é uma folga enorme sobre os 25s do Edge, suficiente
+// pra terminar a geocodificação de praticamente qualquer rodada sem cortar no meio.
+export const config = { maxDuration: 60 }
 
 interface PropertyData {
   cep: string
@@ -39,7 +50,11 @@ function json(body: unknown, status = 200) {
  * máximo possível, mesmo que demore até 2 minutos no total. `offsetBase` evita que a 2ª
  * chamada re-busque as mesmas primeiras páginas da 1ª.
  */
-export default async function handler(request: Request) {
+export default {
+  fetch: handler,
+}
+
+async function handler(request: Request): Promise<Response> {
   if (request.method !== 'POST') {
     return json({ error: 'Método não permitido.' }, 405)
   }
@@ -85,11 +100,12 @@ export default async function handler(request: Request) {
     tipoImovel: propertyData.tipoImovel,
     numeroAvaliando: propertyData.numero,
     max: 20,
-    // 23s deixa uma margem de 2s dentro do limite de 25s do Edge Function — usamos quase todo o
-    // tempo disponível pra dar o máximo de rodadas de busca (ver ALVO_DESEJADO_AMOSTRAS e
-    // MAX_RODADAS em real-comparaveis.ts) antes de aceitar que não achou o suficiente NESSA
-    // invocação (o front-end pode chamar de novo com offsetBase maior pra continuar buscando).
-    budgetMs: 23_000,
+    // 55s deixa uma margem de 5s dentro do limite de 60s da função Node.js (ver `config` acima
+    // — trocado do Edge Function de 25s pra isso exatamente por causa desse orçamento). Sobra
+    // tempo real de sobra pra terminar a geocodificação serial (1 req/s no Nominatim) de dezenas
+    // de candidatos numa única invocação, em vez de cortar no meio e depender de tantas chamadas
+    // encadeadas do front-end.
+    budgetMs: 55_000,
     offsetBase,
     origemCoords,
   })
