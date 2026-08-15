@@ -1,5 +1,72 @@
 import { geocodeEndereco, haversineMeters, sleep, type Coordenadas } from './geocode.js'
 
+// BUG real encontrado e corrigido — causa raiz de "0 amostras" que nenhuma das outras correções
+// (novas fontes de URL, novos portais) resolvia: confirmado por teste real e isolado que 3
+// requisições SIMULTÂNEAS pro MESMO domínio (vivareal.com.br) disparam bloqueio antibot
+// IMEDIATO (403), mesmo em URLs nunca visitadas antes — enquanto 1 requisição isolada, na
+// mesma hora, pro MESMO domínio, funcionou normal (200). Ou seja: o gatilho não é volume
+// histórico acumulado, é CONCORRÊNCIA — vários requests ao mesmo tempo pro mesmo site é uma
+// assinatura de bot que um navegador de verdade nunca produz (uma pessoa não carrega 3 páginas
+// do mesmo site no mesmo milissegundo). O código tinha VÁRIOS pontos disparando isso sem querer:
+// duas URLs previstas do VivaReal em paralelo (ver umaRodada), e a resolução de redirecionamento
+// do Gemini (resolverRedirecionamentoGemini) rodando em Promise.all pra TODOS os links de uma
+// vez — quando o Gemini cita 2+ anúncios do mesmo portal (comum), isso sozinho já dispara 2+
+// requests simultâneos pro mesmo domínio. Este limitador garante NO MÁXIMO 1 requisição em voo
+// por domínio a qualquer momento (fila por hostname) — domínios DIFERENTES continuam paralelos
+// entre si, só o mesmo domínio nunca mais se sobrepõe.
+// BUG real encontrado e corrigido: só evitar SOBREPOSIÇÃO não foi suficiente — confirmado via
+// teste real que 2 requisições pro vivareal.com.br, mesmo perfeitamente serializadas (uma
+// terminando antes da outra começar), ainda dispararam bloqueio na 2ª quando ficaram só ~1-2s
+// de intervalo. Além de nunca sobrepor, agora força um respiro mínimo entre o FIM de uma
+// requisição e o INÍCIO da próxima pro mesmo domínio — mais parecido com o ritmo de navegação
+// humana real.
+const INTERVALO_MINIMO_MESMO_DOMINIO_MS = 3_000
+const filaPorDominio = new Map<string, Promise<unknown>>()
+async function comLimiteDominio<T>(url: string, fn: () => Promise<T>): Promise<T> {
+  let host: string
+  try {
+    host = new URL(url).hostname.toLowerCase()
+  } catch {
+    host = url
+  }
+  const anterior = filaPorDominio.get(host) ?? Promise.resolve()
+  // O resultado volta pra quem chamou assim que `fn()` termina — só a fila (pra próxima
+  // requisição pro MESMO domínio) precisa esperar o respiro extra, não quem já recebeu a
+  // resposta.
+  const resultado = anterior.catch(() => undefined).then(fn)
+  const liberaProximo = resultado.catch(() => undefined).then(() => sleep(INTERVALO_MINIMO_MESMO_DOMINIO_MS))
+  filaPorDominio.set(host, liberaProximo)
+  return resultado
+}
+
+// Solução definitiva pro bloqueio antibot, pedida explicitamente pelo usuário: em vez de só
+// mitigar (limitar concorrência, espaçar no tempo — ambos continuam valendo como fallback),
+// rotear as buscas nos 5 portais através de um proxy com IP ROTATIVO (ScraperAPI) quando
+// configurado. Cada requisição passa por um IP diferente do lado deles, então a reputação de
+// IP (a causa raiz confirmada do bloqueio) deixa de ser um problema — não importa quantas
+// buscas rodem, nenhum IP nosso acumula histórico suspeito. Só usado nos pontos que tocam os 5
+// portais imobiliários diretamente; Nominatim (geocodificação) e a API do Gemini nunca tiveram
+// esse problema e continuam com fetch direto.
+async function fetchPortalImobiliario(url: string, timeoutMs: number): Promise<Response> {
+  const headersNavegador = {
+    'user-agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'accept-language': 'pt-BR,pt;q=0.9',
+  }
+  const apiKey = process.env.SCRAPERAPI_KEY
+  if (apiKey) {
+    const urlProxy = `https://api.scraperapi.com/?api_key=${apiKey}&url=${encodeURIComponent(url)}`
+    return fetch(urlProxy, { signal: AbortSignal.timeout(timeoutMs) })
+  }
+  // Sem a chave configurada, cai pro fetch direto de sempre — ainda protegido pelo limitador de
+  // concorrência/espaçamento por domínio (ver comLimiteDominio), que sozinho já resolvia a
+  // maior parte dos casos, só não elimina o risco por completo.
+  return comLimiteDominio(url, () =>
+    fetch(url, { method: 'GET', redirect: 'follow', headers: headersNavegador, signal: AbortSignal.timeout(timeoutMs) }),
+  )
+}
+
 export interface ComparavelReal {
   endereco: string
   areaM2: number | null
@@ -96,7 +163,16 @@ interface GroundingSupport {
 // separador diferente entre endereço/preço/taxa no título do resultado — Google/Gemini usam
 // vírgula, a Brave usa "·" (meio-ponto) e "-" (confirmado via teste real: sem "·" na lista,
 // "Avenida X · R$ 424.000 · Cond. R$ 387" vazava inteiro pro campo de endereço).
-const ENDERECO_BASE_RE = /(?:Rua|Avenida|Av\.|Alameda|Travessa|Estrada|Rodovia)[^,\n*|<>·•\-:]{2,55}/i
+// BUG real encontrado e corrigido: sem exigir espaço logo após a palavra-chave, o regex
+// combinava "Rodovia"/"Avenida" como SUBSTRING de qualquer palavra que começasse igual — ex.
+// "rodovias e outras vias de acesso" virava um "endereço exato" chamado "rodovias e outras vias
+// de acesso", e "avenidas e conveniências da região" virava "Av." + resto. Confirmado via teste
+// real: um anúncio genérico sem endereço nenhum, só mencionando "rodovias" e "avenidas" no
+// sentido comum da palavra (não como início de nome de rua), foi classificado como precisão
+// 'exato' com um "endereço" fabricado sem sentido. Palavra-chave de logradouro sempre é seguida
+// de espaço + o nome de verdade ("Rodovia Raposo Tavares", "Avenida Paulista") — nunca de "s"
+// (plural) ou pontuação direto. Exigir "\s" logo depois resolve sem afetar nenhum caso real.
+const ENDERECO_BASE_RE = /(?:Rua|Avenida|Av\.|Alameda|Travessa|Estrada|Rodovia)\s[^,\n*|<>·•\-:]{2,55}/i
 // Número do imóvel — é a única outra coisa que capturamos do endereço em si. Permite até ~20
 // caracteres de texto antes do número (ex.: ", nº ", " - ", "próximo ao "), não só adjacência
 // estrita — confirmado via teste real que exigir adjacência total perdia o número em textos
@@ -113,7 +189,27 @@ const NUMERO_PROXIMO_RE = /^(?:(?!R\$|m²)[^\d]){0,20}?(\d{1,6})[A-Za-z]?\b/
 // geocodificável) estava bem ali no texto. Confirmado via teste manual: só 2 de 30 anúncios
 // reais de sobrados na Granja Viana citavam uma rua, mas praticamente todos citavam o
 // condomínio.
-const CONDOMINIO_RE = /(?:Condom[ií]nio|Cond\.)\s+([A-ZÀ-Ú][^,\n*|<>·•\-.:]{2,45})/
+// BUG real encontrado e corrigido: "Cond." também é abreviação comum de "taxa de condomínio"
+// num contexto de preço (ex.: "Taxa de condomínio: R$ 750"), e "R$" começa com um "R" maiúsculo
+// — satisfaz o `[A-ZÀ-Ú]` inicial do grupo de captura sem querer. Confirmado via teste real:
+// "Condomínio R$ 750" e "Condomínio R$ 1" viraram "nome de condomínio" fabricado. O nome de um
+// condomínio de verdade nunca começa com "R$" nem com um número — a negative lookahead rejeita
+// esses casos sem afetar nomes reais.
+// BUG real encontrado e corrigido — pedido explícito do usuário (resultado veio com só 4
+// amostras em vez de 10): o grupo de captura genérico ("qualquer caractere, até 45") não parava
+// em limite nenhum de palavra — quando a descrição do anúncio não tinha pontuação logo depois
+// do nome do condomínio (comum em texto corrido de marketing), a captura engolia a frase
+// inteira junto: confirmado via log real de produção, "Condomínio Viva Mais Barueri" virou
+// "Condomínio Viva Mais Barueri Conforto e PraticidadeEste e" (e outras variações igualmente
+// quebradas, uma por anúncio diferente do MESMO condomínio). Cada uma dessas falha na
+// geocodificação (não é um endereço de verdade) — mas cada tentativa de geocodificar ocupa uma
+// vaga da fila serial (1/s no Nominatim, ver geocodarEFiltrar), então 7+ tentativas
+// desperdiçadas só nesse condomínio sozinho custaram tempo real que sobraria pra candidatos
+// genuinamente diferentes. Limita a captura a no máximo 5 "palavras" no formato de nome próprio
+// (Maiúscula+minúsculas, ou um conector comum minúsculo como "de"/"da"/"do") — para na primeira
+// palavra que não se encaixa nesse formato, que é exatamente onde o texto corrido começa.
+const CONDOMINIO_RE =
+  /(?:Condom[ií]nio|Cond\.)\s+(?!R\$|\d)((?:[A-ZÀ-Ú][a-zà-ú]*|dos|das|do|da|de|e)(?:\s+(?:[A-ZÀ-Ú][a-zà-ú]*|dos|das|do|da|de|e)){0,4})/
 // O símbolo "²" às vezes some do texto (confirmado via teste real: um bloco JSON-LD de SEO do
 // imovelweb.com.br trazia "Área Privativa de 59 m," sem o "²") — aceita "m" sozinho como
 // fallback, desde que seguido de fronteira de palavra (evita casar o "m" no meio de outra
@@ -395,12 +491,40 @@ function urlPertenceAPortalConhecido(url: string): boolean {
   }
 }
 
+// BUG real encontrado e corrigido: "sem dígito na URL = página de categoria" (heurística
+// antiga) falha pra URLs de categoria que embutem um filtro numérico na própria slug, ex.
+// "imovelweb.com.br/casas-sobrado-venda-granja-viana-cotia-2-quartos-ordem-precio-menor.html"
+// ("2-quartos" tem dígito) — confirmado via teste real: essa URL de listagem (42 anúncios,
+// não uma unidade) passou pelo filtro antigo e virou uma "amostra" com preço/área extraídos
+// do texto ao redor, sem ser um anúncio real de unidade nenhuma. Critério mais robusto: cada
+// portal tem um caminho de URL fixo pra anúncio de unidade individual (ver
+// CAMINHO_ANUNCIO_POR_PORTAL, já usado em extrairCandidatosDeCategoria pra achar hrefs de
+// anúncio dentro de uma página de categoria) — páginas de categoria/listagem nunca usam esse
+// caminho, então checar a presença dele é decisivo, ao contrário de "tem algum dígito".
+function urlContemCaminhoDeAnuncio(url: string): boolean {
+  let host: string
+  try {
+    host = new URL(url).hostname.toLowerCase()
+  } catch {
+    return false
+  }
+  const portal = PORTAIS.find((p) => host === p || host.endsWith(`.${p}`))
+  const caminho = portal ? CAMINHO_ANUNCIO_POR_PORTAL[portal] : undefined
+  return Boolean(caminho) && url.includes(caminho)
+}
+
 /** Mesmo critério que extrairCandidato usa pra rejeitar uma URL como "página de categoria/
- * listagem" (sem dígito, não institucional, não aluguel) — mas aqui só identifica, não
- * descarta: essas URLs viram "leads" pra buscar direto (ver extrairCandidatosDeCategoria),
- * porque cada uma tende a listar dezenas de anúncios individuais reais de uma vez. */
+ * listagem" (não tem o caminho de anúncio individual do portal, não institucional, não
+ * aluguel) — mas aqui só identifica, não descarta: essas URLs viram "leads" pra buscar direto
+ * (ver extrairCandidatosDeCategoria), porque cada uma tende a listar dezenas de anúncios
+ * individuais reais de uma vez. */
 function ehPaginaDeCategoria(url: string): boolean {
-  return urlPertenceAPortalConhecido(url) && !PAGINA_INSTITUCIONAL_RE.test(url) && !ALUGUEL_URL_RE.test(url) && !/\d/.test(url)
+  return (
+    urlPertenceAPortalConhecido(url) &&
+    !PAGINA_INSTITUCIONAL_RE.test(url) &&
+    !ALUGUEL_URL_RE.test(url) &&
+    !urlContemCaminhoDeAnuncio(url)
+  )
 }
 
 /** Detecção simples por palavra-chave (URL + texto do anúncio) — só pra fins de transparência
@@ -427,17 +551,66 @@ function detectarTipo(textoBruto: string, url: string): string | null {
   return null
 }
 
-function extrairCandidato(textoBruto: string, url: string | undefined, bairro: string): CandidatoBruto | null {
+// BUG real encontrado e corrigido — pedido explícito do usuário ("as amostras agora estejam
+// corretas... estes erros não podem acontecer jamais"): quando o VivaReal serve a versão
+// reduzida da página (sem "address.streetAddress" — confirmado que acontece sob defesa
+// antibot, mesmo com HTTP 200) E o texto livre também não cita rua nem "Condomínio X", o
+// candidato caía direto pro nível 'bairro' — mostrando só o nome do bairro inteiro com uma
+// distância até o centroide dele, que pode passar de 2500m mesmo pra imóveis genuinamente
+// próximos (Granja Viana é um bairro grande). A URL do próprio anúncio do VivaReal, no entanto,
+// SEMPRE embute o nome da sub-região/condomínio na slug (confirmado em dezenas de exemplos reais
+// nesta sessão: ".../casa-de-condominio-4-quartos-sao-paulo-ii-cotia-com-garagem-.../" →
+// "São Paulo II"), independente de a página estar servindo a versão reduzida ou não — não é um
+// dado que a defesa antibot consegue omitir sem quebrar a própria URL. Usa isso como fallback
+// ANTES de aceitar o nível 'bairro' — sobe a precisão pra 'condomínio', que já teve seu raio de
+// busca corretamente restrito, em vez de cair no bairro inteiro sem restrição de raio.
+function extrairSubregiaoDaUrlVivaReal(url: string, bairro: string): string | null {
+  try {
+    if (!new URL(url).hostname.toLowerCase().endsWith('vivareal.com.br')) return null
+  } catch {
+    return null
+  }
+  const m = url.match(/\/imovel\/[a-z0-9-]*?-\d+-quartos-([a-z0-9-]+)-com-garagem-/)
+  if (!m || !m[1]) return null
+  const palavras = m[1].split('-').filter(Boolean)
+  if (palavras.length === 0) return null
+  // BUG real encontrado e corrigido: quando o anúncio não pertence a um condomínio/sub-região
+  // NOMEADO, a própria slug repete só o nome do BAIRRO (+ a cidade) — ex.
+  // ".../3-quartos-granja-viana-cotia-com-garagem-.../" pro bairro "Granja Viana". Sem checar
+  // isso, virava um "endereço" tipo "Condomínio/região Granja Viana Cotia", que geocodifica
+  // pra um ponto ESTRANHO (confirmado via teste real: 4990m de distância, quando o bairro
+  // sozinho geocodifica certinho) — pior que simplesmente cair pro nível 'bairro' normal, que já
+  // tem raio isento e distância capada. Só promove pra 'condomínio' quando a slug tem PELO MENOS
+  // uma palavra a mais além das palavras do próprio bairro (a cidade sozinha não conta).
+  const palavrasBairro = slugParaUrl(bairro).split('-').filter(Boolean)
+  const mesmoPrefixo = palavrasBairro.every((p, i) => palavras[i] === p)
+  const palavrasExtras = palavras.length - palavrasBairro.length
+  if (mesmoPrefixo && palavrasExtras <= 1) return null
+  return palavras.map((p) => p.charAt(0).toUpperCase() + p.slice(1)).join(' ')
+}
+
+function extrairCandidato(textoBruto: string, url: string | undefined, bairro: string, ruaConhecida?: string): CandidatoBruto | null {
   if (!url) return null
   if (!urlPertenceAPortalConhecido(url)) return null
   if (PAGINA_INSTITUCIONAL_RE.test(url)) return null
   if (ALUGUEL_URL_RE.test(url)) return null
   // Páginas de CATEGORIA/listagem (ex.: "zapimoveis.com.br/venda/apartamentos/sp+barueri++jd-
   // belval/") não são um anúncio de uma unidade específica, mesmo que o trecho de busca
-  // mencione um preço de algum imóvel listado nela — confirmado via teste real. Um anúncio de
-  // unidade específica sempre tem algum número na URL (ID do anúncio, número do endereço,
-  // preço, CEP); uma página de categoria/listagem, quase nunca.
-  if (!/\d/.test(url)) return null
+  // mencione um preço de algum imóvel listado nela — confirmado via teste real. Ver
+  // urlContemCaminhoDeAnuncio: exigir o caminho de URL fixo do anúncio individual do portal é
+  // mais confiável que "tem algum dígito" (uma página de categoria pode ter dígito também, ex.
+  // um filtro de quartos embutido na slug — confirmado via teste real com
+  // ".../2-quartos-ordem-precio-menor.html", uma listagem de 42 anúncios que passava despercebida).
+  if (!urlContemCaminhoDeAnuncio(url)) return null
+  // BUG real encontrado e corrigido: o imovelweb anexa parâmetros de rastreio de onde o link foi
+  // clicado na página de catálogo (ex. "?n_src=Listado&n_pills=Churrasqueira&n_pg=1&n_pos=8") —
+  // o MESMO anúncio aparece com querystrings DIFERENTES dependendo de qual "pill"/posição da
+  // listagem gerou o link. Confirmado via teste real: o mesmo imóvel (mesmo ID numérico no
+  // caminho) apareceu 2x como amostra "diferente" numa busca encadeada, porque a dedupe (por
+  // string de URL exata, tanto aqui quanto em urlsJaVistas entre chamadas) via cada querystring
+  // como uma URL distinta. Remove a querystring aqui, na entrada — o caminho do anúncio já é
+  // por si só o identificador único da unidade, e o link fica mais limpo pro laudo final.
+  const urlLimpa = url.split('?')[0].split('#')[0]
   const text = removerHtml(textoBruto)
 
   const precoMatch = text.match(PRECO_RE)
@@ -458,7 +631,17 @@ function extrairCandidato(textoBruto: string, url: string | undefined, bairro: s
     const precoM2 = valorAnunciado / areaM2
     if (precoM2 < 800 || precoM2 > 60_000) return null
   }
-  const enderecoInfo = extrairEnderecoComPrecisao(text, bairro)
+  // `ruaConhecida` (rua real vinda de "address.streetAddress" do JSON-LD do próprio portal —
+  // ver ListingJsonLd) sempre ganha de qualquer coisa extraída do texto livre: é dado
+  // estruturado do próprio anúncio, não uma tentativa de adivinhar via regex. Nunca junta com
+  // um número aqui — o portal não publica o número exato da unidade, e inventar um seria pior
+  // que não ter (a distância calculada a partir dele já é honesta o suficiente: rua real,
+  // mesmo sem número, é bem mais preciso que cair pro bairro inteiro).
+  let enderecoInfo = ruaConhecida ? { endereco: ruaConhecida, precisao: 'exato' as PrecisaoEndereco } : extrairEnderecoComPrecisao(text, bairro)
+  if (enderecoInfo?.precisao === 'bairro') {
+    const subregiao = extrairSubregiaoDaUrlVivaReal(url, bairro)
+    if (subregiao) enderecoInfo = { endereco: `Condomínio/região ${subregiao}`, precisao: 'condominio' }
+  }
   if (!enderecoInfo) return null
 
   return {
@@ -466,8 +649,8 @@ function extrairCandidato(textoBruto: string, url: string | undefined, bairro: s
     precisaoEndereco: enderecoInfo.precisao,
     areaM2,
     valorAnunciado,
-    url,
-    tipoDetectado: detectarTipo(text, url),
+    url: urlLimpa,
+    tipoDetectado: detectarTipo(text, urlLimpa),
   }
 }
 
@@ -503,22 +686,45 @@ interface ResultadoBuscaPortal {
  * requisição HTTP simples que segue o redirect — `response.url` já vem com o destino final)
  * antes de aplicar qualquer filtro, pra chegar no link de verdade do anúncio.
  */
+// BUG real encontrado e corrigido: uma falha de rede (timeout, conexão recusada) nesta única
+// tentativa fazia o candidato inteiro ser descartado mais adiante (a URL de redirecionamento do
+// Google nunca bate em urlPertenceAPortalConhecido) — mesmo quando o Gemini já tinha achado um
+// candidato real com preço/endereço no texto. Confirmado via teste real: sob defesa antibot
+// ativa num portal (ver ehPaginaDeCategoria/categoria non-OK), a MESMA condição de rede também
+// deixa esta resolução mais lenta/instável, derrubando pra 0 candidatos aceitos mesmo com
+// groundingSupports > 0. Uma retentativa rápida cobre o caso comum de instabilidade passageira
+// sem custar tempo demais (a rodada já orçava fetchTimeoutMs pra isso).
 async function resolverRedirecionamentoGemini(url: string): Promise<string> {
   if (!url.includes('vertexaisearch.cloud.google.com')) return url
-  try {
-    const res = await fetch(url, {
-      method: 'GET',
-      redirect: 'follow',
-      headers: {
-        'user-agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      },
-      signal: AbortSignal.timeout(5_000),
-    })
-    return res.url || url
-  } catch {
-    return url
+  // BUG real encontrado e corrigido: cheguei a serializar isto globalmente por
+  // comLimiteDominio (todos esses links compartilham o mesmo host intermediário
+  // "vertexaisearch.cloud.google.com"), pensando em evitar 2 resoluções concorrentes pousando
+  // no MESMO site de destino final. Testado ao vivo: isso serializou TODAS as resoluções de
+  // TODOS os 5 portais entre si (mesmo host intermediário = mesma fila), o que estourou o
+  // orçamento de tempo da rodada inteira antes mesmo de começar a geocodificar — 0 amostras por
+  // falta de tempo, não por bloqueio. Na prática, os destinos que o grounding cita são
+  // DIVERSOS (confirmado: dezenas de domínios diferentes nos logs reais desta sessão, quase
+  // nunca dois no mesmo domínio na mesma rodada) — o risco real de colisão aqui é baixo. O
+  // ponto de colisão CONFIRMADO e sistemático era outro (as URLs previstas do VivaReal, ver
+  // extrairCandidatosDeCategoria, que SEMPRE mira os mesmos domínios) — a serialização fica só
+  // lá, onde o problema é garantido, não aqui, onde o custo supera o benefício.
+  for (let tentativa = 1; tentativa <= 2; tentativa++) {
+    try {
+      const res = await fetch(url, {
+        method: 'GET',
+        redirect: 'follow',
+        headers: {
+          'user-agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        },
+        signal: AbortSignal.timeout(6_000),
+      })
+      if (res.url) return res.url
+    } catch {
+      // tenta de novo antes de desistir
+    }
   }
+  return url
 }
 
 async function buscarCandidatos(prompt: string, max: number, fetchTimeoutMs: number, bairro: string): Promise<ResultadoBuscaPortal> {
@@ -571,6 +777,13 @@ async function buscarCandidatos(prompt: string, max: number, fetchTimeoutMs: num
     const categorias: string[] = []
     const seenUrls = new Set<string>()
 
+    // Diagnóstico temporário — pedido explícito do usuário pra entender por que "parsed
+    // candidates 0" persiste mesmo com groundingSupports > 0: sem isso, não dá pra saber se o
+    // problema é resolução de redirecionamento falhando (chunkUrl fica undefined) ou o texto/URL
+    // resolvidos sendo rejeitados pelos filtros de extrairCandidato (sem preço, portal
+    // desconhecido, página de categoria etc.) — motivos bem diferentes, correções bem diferentes.
+    let semUrlResolvida = 0
+    let rejeitadoPeloFiltro = 0
     for (const support of supports) {
       const text = support.segment?.text || ''
       const chunkIndex = support.groundingChunkIndices?.[0]
@@ -581,13 +794,31 @@ async function buscarCandidatos(prompt: string, max: number, fetchTimeoutMs: num
       // URL à parte pra ser buscada direto depois (ver extrairCandidatosDeCategoria).
       if (chunkUrl && ehPaginaDeCategoria(chunkUrl) && !categorias.includes(chunkUrl)) categorias.push(chunkUrl)
       const candidato = extrairCandidato(text, chunkUrl, bairro)
-      if (!candidato || seenUrls.has(candidato.url)) continue
+      if (!candidato || seenUrls.has(candidato.url)) {
+        if (!chunkUrl || chunkUrl.includes('vertexaisearch.cloud.google.com')) semUrlResolvida++
+        else if (!candidato) {
+          rejeitadoPeloFiltro++
+          console.error('[real-comparaveis] rejeitado:', chunkUrl, '| texto:', text.slice(0, 140).replace(/\s+/g, ' '))
+        }
+        continue
+      }
       seenUrls.add(candidato.url)
       results.push(candidato)
       if (results.length >= max) break
     }
 
-    console.error('[real-comparaveis] parsed candidates', results.length, 'from', supports.length, 'grounding supports |', categorias.length, 'página(s) de categoria vista(s)')
+    console.error(
+      '[real-comparaveis] parsed candidates',
+      results.length,
+      'from',
+      supports.length,
+      'grounding supports |',
+      categorias.length,
+      'página(s) de categoria vista(s) | sem-url-resolvida:',
+      semUrlResolvida,
+      '| rejeitado-por-filtro:',
+      rejeitadoPeloFiltro,
+    )
     return { candidatos: results, categorias }
   } catch (err) {
     console.error('[real-comparaveis] search error', String(err))
@@ -605,17 +836,7 @@ async function buscarCandidatos(prompt: string, max: number, fetchTimeoutMs: num
  * occasional stale link slipping through — so only the unambiguous dead signals reject. */
 export async function urlEstaViva(url: string): Promise<boolean> {
   try {
-    const res = await fetch(url, {
-      method: 'GET',
-      redirect: 'follow',
-      headers: {
-        'user-agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'accept-language': 'pt-BR,pt;q=0.9',
-      },
-      signal: AbortSignal.timeout(URL_CHECK_TIMEOUT_MS),
-    })
+    const res = await fetchPortalImobiliario(url, URL_CHECK_TIMEOUT_MS)
     return res.status !== 404 && res.status !== 410
   } catch {
     // BUG real encontrado e corrigido: timeout/erro de rede rejeitava o candidato (return
@@ -638,8 +859,17 @@ export async function urlEstaViva(url: string): Promise<boolean> {
  * ajudar o geocodificador a achar o ponto certo. Quando a precisão já É 'bairro', o campo
  * "endereco" do candidato já é literalmente o nome do bairro (ver extrairEnderecoComPrecisao),
  * então não duplica. */
+// BUG real encontrado e corrigido: o nível 'exato' geocodificava só "rua, número, cidade - uf",
+// SEM o bairro — mas o endereço do PRÓPRIO avaliando (origem, geocodificado em
+// buscarComparaveisReaisSemLimite a partir de `enderecoCompleto`) sempre inclui o bairro. Pra
+// ruas longas tipo "Estrada" (comuns em zona rural/baixa densidade, atravessando mais de um
+// bairro ao longo do trajeto), essa assimetria faz o Nominatim resolver a MESMA rua+número pra
+// pontos DIFERENTES dependendo de ter ou não o bairro como desambiguador — confirmado via teste
+// real: duas amostras rotuladas com a MESMA rua+número do próprio avaliando ("Estrada Velha de
+// Sorocaba, 599") vieram a 1328m de distância, quando deveriam estar a ~0m (é literalmente o
+// mesmo texto de endereço). Incluir o bairro também no nível 'exato' garante que a mesma
+// rua+número sempre geocodifica pro mesmo ponto que o avaliando, seja lá qual for a amostra.
 function montarQueryGeocode(candidato: CandidatoBruto, cidade: string, uf: string, bairro: string): string {
-  if (candidato.precisaoEndereco === 'exato') return `${candidato.endereco}, ${cidade} - ${uf}`
   if (candidato.precisaoEndereco === 'bairro') return `${bairro}, ${cidade} - ${uf}`
   return `${candidato.endereco}, ${bairro}, ${cidade} - ${uf}`
 }
@@ -684,6 +914,18 @@ async function geocodarEFiltrar(
   const NOMINATIM_INTERVALO_MS = 1_000
   const resultados: (ComparavelReal | null)[] = []
   const processadosUrls: string[] = []
+  // BUG real encontrado e corrigido — pedido explícito do usuário ("verifique, veja o
+  // processo... tem que dar certo"): um condomínio grande lista DEZENAS de unidades diferentes,
+  // cada uma um candidato/URL distinto, mas todas com o MESMO texto de endereço (ex.
+  // "Condomínio Viva Mais Barueri") — sem esse cache, cada uma virava uma chamada SEPARADA ao
+  // Nominatim, MESMO quando a query de geocodificação é idêntica. Confirmado via log real de
+  // produção: "Condomínio Viva Mais Barueri" geocodificado (e falhando) 4 vezes seguidas na
+  // MESMA rodada, desperdiçando 4 vagas da fila serial (1/s) que sobrariam pra candidatos
+  // genuinamente diferentes — com só ~15-18s reais de orçamento pra geocodificação depois da
+  // busca, cada vaga desperdiçada custa uma amostra real a menos no resultado final. Cacheia
+  // por STRING DE QUERY (não por URL do candidato) — a segunda ocorrência da mesma query nunca
+  // bate na rede, nem soma o intervalo de 1s do Nominatim.
+  const cacheQueryGeocode = new Map<string, Coordenadas | null>()
   // BUG real encontrado e corrigido: a correção da janela de extração de categoria (ver
   // extrairCandidatosDeCategoria) passou a achar MUITO mais candidatos brutos por rodada (até
   // 23 de 30 num teste real, contra 1 de 30 antes) — mas cada candidato geocodificado em SÉRIE
@@ -706,13 +948,16 @@ async function geocodarEFiltrar(
     // imóvel avaliando) — sem isso, nomes de rua/condomínio comuns podem geocodificar para a
     // cidade errada, ou simplesmente não resolver.
     processadosUrls.push(candidato.url)
-    const coords = await geocodeEndereco(montarQueryGeocode(candidato, cidade, uf, bairro))
+    const queryGeocode = montarQueryGeocode(candidato, cidade, uf, bairro)
+    const jaTinhaEssaQuery = cacheQueryGeocode.has(queryGeocode)
+    const coords = jaTinhaEssaQuery ? cacheQueryGeocode.get(queryGeocode)! : await geocodeEndereco(queryGeocode)
+    if (!jaTinhaEssaQuery) cacheQueryGeocode.set(queryGeocode, coords)
     if (!coords) {
       console.error('[real-comparaveis] candidato descartado (geocode falhou):', candidato.endereco)
       resultados.push(null)
     } else {
-      const distanciaM = haversineMeters(origem, coords)
-      // O filtro de raio não se aplica ao nível 'bairro' — a distância aí é até o CENTRO do
+      const distanciaBrutaM = haversineMeters(origem, coords)
+      // O filtro de raio não REJEITA no nível 'bairro' — a distância aí é até o CENTRO do
       // bairro (geocodificado por falta de rua/condomínio identificável no anúncio), não até o
       // imóvel de verdade, então pode por acaso computar além do raio mesmo sendo
       // comprovadamente do mesmo bairro do avaliando (ex.: avaliando numa ponta do bairro,
@@ -720,14 +965,29 @@ async function geocodarEFiltrar(
       // específico (é ele que geramos a query com) já é o critério de proximidade pra este
       // nível — descartar por raio aqui rejeitaria candidatos reais e válidos por um artefato
       // de cálculo, não por estarem genuinamente longe.
-      if (raioM !== null && distanciaM > raioM && candidato.precisaoEndereco !== 'bairro') {
-        console.error('[real-comparaveis] candidato descartado (fora do raio):', candidato.endereco, '-', Math.round(distanciaM), 'm')
+      //
+      // BUG real encontrado e corrigido — pedido explícito do usuário ("a pessoa não vai saber
+      // quanto vale realmente" — mesmo motivo do fix no intervalo de valor): mesmo não
+      // rejeitando, mostrar a distância BRUTA (que pode passar de 2500m, um artefato do
+      // centroide do bairro ficar longe do avaliando) num campo "distanciaM" sem nenhuma ressalva
+      // passa a impressão de uma medição precisa que simplesmente não é — o próprio comentário
+      // acima já reconhece que esse número "pode computar além do raio... por um artefato de
+      // cálculo". Em vez de mostrar o valor bruto, exibe o TETO do raio de busca desse tipo de
+      // imóvel (o limite que já está sendo usado como critério de proximidade) — nunca afirma uma
+      // distância mais precisa do que realmente se sabe, mas também nunca mostra um número maior
+      // que o próprio critério de busca usado.
+      const distanciaM =
+        candidato.precisaoEndereco === 'bairro' && raioM !== null ? Math.min(distanciaBrutaM, raioM) : distanciaBrutaM
+      if (raioM !== null && distanciaBrutaM > raioM && candidato.precisaoEndereco !== 'bairro') {
+        console.error('[real-comparaveis] candidato descartado (fora do raio):', candidato.endereco, '-', Math.round(distanciaBrutaM), 'm')
         resultados.push(null)
       } else {
         resultados.push({ ...candidato, distanciaM } as ComparavelReal)
       }
     }
-    if (candidato !== candidatos[candidatos.length - 1]) await sleep(NOMINATIM_INTERVALO_MS)
+    // Sem chamada real ao Nominatim (resultado veio do cache), não há limite de ritmo pra
+    // respeitar — só espera quando de fato acabou de usar a rede.
+    if (!jaTinhaEssaQuery && candidato !== candidatos[candidatos.length - 1]) await sleep(NOMINATIM_INTERVALO_MS)
   }
   // Mais próximos primeiro — preferência por proximidade mesmo quando o raio permite até 500m.
   const aprovados = resultados.filter((c): c is ComparavelReal => c !== null).sort((a, b) => (a.distanciaM ?? 0) - (b.distanciaM ?? 0))
@@ -762,6 +1022,91 @@ async function geocodarEFiltrar(
 // estes 5 portais.
 const PORTAIS = ['imovelweb.com.br', 'attria.com.br', 'chavesnamao.com.br', 'vivareal.com.br', 'zapimoveis.com.br']
 
+// Confirmado via log real de produção (Sobrado, bairro Granja Viana, Cotia/SP): a página de
+// catálogo do VivaReal pra esse bairro+tipo tem URL PREVISÍVEL —
+// "vivareal.com.br/venda/sp/cotia/bairros/granja-viana/sobrado_residencial/" — e trouxe 40
+// candidatos reais via JSON-LD assim que buscada. O problema: normalmente essa URL só é
+// descoberta INDIRETAMENTE, via um link de categoria que aparece no texto de uma busca de
+// grounding (ver buscarDeCategoriasNovas) — e pra tipos de baixa densidade (casa/sobrado), o
+// grounding por anúncio individual às vezes não acha NADA em 1-2 rodadas inteiras (~7-16s cada)
+// antes de finalmente topar com esse link, deixando pouco tempo de orçamento pra geocodificar
+// (serial, ~1 req/s no Nominatim) os dezenas de candidatos que a página traria. Tentar essa URL
+// prevista DIRETO, em paralelo com a 1ª rodada de grounding (nunca bloqueando nem substituindo
+// ela), evita esse desperdício quando o palpite acerta — e é inofensivo quando erra (só um 404
+// silencioso, já tratado por extrairCandidatosDeCategoria). Só pros tipos onde o padrão
+// "{tipo}_residencial" foi de fato observado/confirmado (casa e sobrado) — terreno e imóvel
+// rural ficam de fora por incerteza real sobre o esquema de URL usado pra eles.
+const MARCAS_DIACRITICAS_RE = new RegExp('[̀-ͯ]', 'g')
+function slugParaUrl(texto: string): string {
+  return texto
+    .normalize('NFD')
+    .replace(MARCAS_DIACRITICAS_RE, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
+const TIPO_SLUG_VIVAREAL: Record<string, string> = {
+  'Casa residencial': 'casa_residencial',
+  Casa: 'casa_residencial',
+  Sobrado: 'sobrado_residencial',
+  // Confirmado via log real de produção (Vila Madalena, São Paulo/SP): a mesma URL prevista
+  // pra apartamento existe e segue o padrão idêntico ao de casa/sobrado.
+  Apartamento: 'apartamento_residencial',
+}
+function montarUrlCategoriaVivaRealPrevista(tipoImovel: string, bairro: string, cidade: string, uf: string): string | null {
+  const tipoSlug = TIPO_SLUG_VIVAREAL[tipoImovel]
+  if (!tipoSlug || !bairro || !cidade || !uf) return null
+  return `https://www.vivareal.com.br/venda/${slugParaUrl(uf)}/${slugParaUrl(cidade)}/bairros/${slugParaUrl(bairro)}/${tipoSlug}/`
+}
+
+// Confirmado via link real trazido pelo usuário: o imovelweb tem uma página de catálogo
+// filtrada pela RUA do próprio avaliando (não só o bairro inteiro) — URL previsível
+// "imovelweb.com.br/casas-venda-{bairro}-{cidade}-drc-{rua}.html" (ex.
+// "casas-venda-granja-viana-cotia-drc-estrada-velha-de-sorocaba.html", 164 casas reais). Sendo
+// filtrada pela rua exata, tende a devolver candidatos ainda mais próximos que a página de
+// catálogo genérica do bairro (ver montarUrlCategoriaVivaRealPrevista) — vale a pena tentar em
+// paralelo com ela. Só pros tipos de baixa densidade (ver TIPOS_BAIXA_DENSIDADE) — o segmento
+// "casas-venda" é específico pra casa/sobrado, não existe equivalente confirmado pra
+// apartamento.
+function montarUrlCategoriaImovelwebPrevista(tipoImovel: string, ruaAvaliando: string, bairro: string, cidade: string): string | null {
+  if (!TIPOS_BAIXA_DENSIDADE.has(tipoImovel) || !ruaAvaliando || !bairro || !cidade) return null
+  return `https://www.imovelweb.com.br/casas-venda-${slugParaUrl(bairro)}-${slugParaUrl(cidade)}-drc-${slugParaUrl(ruaAvaliando)}.html`
+}
+
+// Confirmado via URL real descoberta por grounding numa rodada anterior desta mesma sessão
+// (".../bairros/granja-viana/avenida-sao-camilo/sobrado_residencial/") e validada manualmente: o
+// VivaReal TAMBÉM tem uma página de catálogo por RUA, inserindo o segmento da rua entre o bairro
+// e o tipo — "bairros/{bairro}/{rua}/{tipo}_residencial/". É uma URL DIFERENTE da página de
+// bairro inteiro (montarUrlCategoriaVivaRealPrevista) — importante ter as duas como fontes
+// independentes: numa defesa antibot pontual contra uma URL específica (confirmado que acontece
+// nesta mesma sessão, mesmo portal), a outra pode continuar respondendo normalmente.
+function montarUrlCategoriaVivaRealRuaPrevista(tipoImovel: string, ruaAvaliando: string, bairro: string, cidade: string, uf: string): string | null {
+  const tipoSlug = TIPO_SLUG_VIVAREAL[tipoImovel]
+  if (!tipoSlug || !ruaAvaliando || !bairro || !cidade || !uf) return null
+  return `https://www.vivareal.com.br/venda/${slugParaUrl(uf)}/${slugParaUrl(cidade)}/bairros/${slugParaUrl(bairro)}/${slugParaUrl(ruaAvaliando)}/${tipoSlug}/`
+}
+
+// BUG real encontrado e corrigido — causa raiz de "0 amostras" descoberta ao investigar por que
+// a busca por portal individual (Gemini) não achava nada mesmo com dezenas de imóveis reais
+// disponíveis: os únicos 2 atalhos de URL prevista (VivaReal, Imovelweb) tinham ficado
+// temporariamente bloqueados por antibot depois de tanto teste na mesma região — sem um 3º
+// atalho pros outros portais permitidos, isso zerava tudo mesmo com o ZapImóveis (mesmo grupo
+// do VivaReal) respondendo normalmente e com dezenas de anúncios reais da MESMA região.
+// Confirmado via teste real: "zapimoveis.com.br/venda/{tipo}/{uf}+{cidade}++{bairro}/" (o "++"
+// duplo é um placeholder de sub-região vazia, confirmado empiricamente) devolve JSON-LD completo
+// no mesmo formato "RealEstateListing" do VivaReal (mesmo grupo empresarial).
+const TIPO_SLUG_ZAP: Record<string, string> = {
+  'Casa residencial': 'casas',
+  Casa: 'casas',
+  Sobrado: 'casas',
+  Apartamento: 'apartamentos',
+}
+function montarUrlCategoriaZapImoveisPrevista(tipoImovel: string, bairro: string, cidade: string, uf: string): string | null {
+  const tipoSlug = TIPO_SLUG_ZAP[tipoImovel]
+  if (!tipoSlug || !bairro || !cidade || !uf) return null
+  return `https://www.zapimoveis.com.br/venda/${tipoSlug}/${slugParaUrl(uf)}+${slugParaUrl(cidade)}++${slugParaUrl(bairro)}/`
+}
+
 // BUG real encontrado e corrigido — pedido explícito do usuário ("tire endereço e faça que
 // busque pelo bairro"): a busca por ENDEREÇO/rua específica no prompt (versão anterior) e a
 // descoberta de catálogo por CEP (buscarPaginaCategoriaPorCep) mostraram-se instáveis em teste
@@ -788,31 +1133,6 @@ ${escopo}
 Para cada anúncio encontrado, escreva uma linha própria com o endereço (rua e número quando divulgados no anúncio, ou o nome do condomínio/empreendimento quando a rua não for divulgada — comum em casas de condomínio fechado), o PREÇO DE VENDA em R$ e a área em m². O preço é obrigatório — se uma página não tiver um preço de venda claro de uma unidade específica, não a inclua. Seja direto, sem introdução.`
 }
 
-/** Extrai "rua + número" do endereço completo montado pelo chamador (formato
- * "Rua X, número, Bairro, Cidade - UF") no formato "Rua X, número" — usado como referência pra
- * preencher o endereço de um candidato de categoria que não menciona a própria rua (ver
- * `ruaReferencia` em extrairCandidatosDeCategoria).
- *
- * BUG real encontrado e corrigido: esta função unia rua e número com um simples ESPAÇO (ex.
- * "Avenida X 2245"), não vírgula. Quando esse texto é prepended a uma descrição sem vírgula
- * nenhuma logo depois (comum: descrições de anúncio como "Apartamento à venda –..."),
- * ENDERECO_BASE_RE (que só para de capturar a "rua" num desses caracteres: vírgula, quebra de
- * linha, etc.) engolia o número JUNTO do resto do texto seguinte inteiro como se fosse tudo
- * nome de rua — ex.: "endereco" saía como "Henrique Gonçalves Baptista 2245 Apartamento à
- * venda –", sem o número separado em campo próprio. Confirmado via log real de produção: TODOS
- * os candidatos vindos do JSON-LD do imovelweb.com.br falhavam a geocodificação por causa
- * exatamente disso (Nominatim não reconhece esse texto como endereço válido). Unir com vírgula
- * faz ENDERECO_BASE_RE parar exatamente depois do nome da rua, deixando NUMERO_PROXIMO_RE
- * capturar o número corretamente como campo separado, do jeito que extrairEndereco espera. */
-function ruaDoEnderecoCompleto(enderecoCompleto: string): string {
-  const partes = enderecoCompleto.split(',')
-  return partes
-    .slice(0, 2)
-    .map((p) => p.trim())
-    .filter(Boolean)
-    .join(', ')
-}
-
 /** Segmento de URL que cada portal usa pra uma página de ANÚNCIO INDIVIDUAL (não uma página de
  * categoria/bairro tipo "201 Casas à venda em..."). Descoberto testando a Brave Search API
  * diretamente: sem esse segmento na consulta, a Brave devolvia quase só páginas de categoria
@@ -835,6 +1155,14 @@ const MAX_CANDIDATOS_POR_CATEGORIA = 40
 interface ListingJsonLd {
   url: string
   description: string
+  /** Rua real do anúncio (sem número — os portais nunca publicam o número exato da unidade,
+   * só a rua), quando o bloco JSON-LD tem um "address.streetAddress" estruturado. Confirmado
+   * via teste real: o VivaReal publica isso pra praticamente todo anúncio ("Avenida José
+   * Giorgi", "Rua Santo Amaro" etc.), mesmo quando a "description" em texto livre não cita rua
+   * nenhuma (comum em casa de condomínio fechado) — muito mais confiável que tentar achar o
+   * nome do condomínio por regex no texto livre (ver CONDOMINIO_RE), que falha na maioria dos
+   * casos reais porque o texto raramente usa literalmente "Condomínio X". */
+  streetAddress?: string
 }
 
 /**
@@ -879,7 +1207,10 @@ function extrairListingsJsonLd(html: string): ListingJsonLd[] {
         const url = typeof obj.url === 'string' ? obj.url : null
         const description =
           typeof obj.description === 'string' ? obj.description : typeof obj.name === 'string' ? obj.name : ''
-        if (url) listings.push({ url, description })
+        const enderecoObj = obj.address && typeof obj.address === 'object' ? (obj.address as Record<string, unknown>) : null
+        const streetAddress =
+          enderecoObj && typeof enderecoObj.streetAddress === 'string' ? enderecoObj.streetAddress.trim() : undefined
+        if (url) listings.push({ url, description, streetAddress: streetAddress || undefined })
       }
     }
   }
@@ -897,21 +1228,15 @@ function extrairListingsJsonLd(html: string): ListingJsonLd[] {
  * regras de qualidade do resto do pipeline (extrairCandidato) — nunca aceita um candidato sem
  * preço real extraído do próprio texto.
  */
-async function extrairCandidatosDeCategoria(urlCategoria: string, site: string, ruaReferencia: string, bairro: string): Promise<CandidatoBruto[]> {
+async function extrairCandidatosDeCategoria(urlCategoria: string, site: string, bairro: string): Promise<CandidatoBruto[]> {
   const caminhoAnuncio = CAMINHO_ANUNCIO_POR_PORTAL[site]
   if (!caminhoAnuncio) return []
   try {
-    const res = await fetch(urlCategoria, {
-      method: 'GET',
-      redirect: 'follow',
-      headers: {
-        'user-agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'accept-language': 'pt-BR,pt;q=0.9',
-      },
-      signal: AbortSignal.timeout(HTML_CATEGORIA_TIMEOUT_MS),
-    })
+    // Roteado via proxy de IP rotativo quando configurado (ver fetchPortalImobiliario) — é
+    // exatamente este fetch que, disparado 2x ao mesmo tempo pro vivareal.com.br (bairro + rua
+    // previstas, ver umaRodada), foi confirmado como o gatilho direto do bloqueio antibot que
+    // zerava a busca inteira mesmo em bairros nunca testados antes.
+    const res = await fetchPortalImobiliario(urlCategoria, HTML_CATEGORIA_TIMEOUT_MS)
     if (!res.ok) {
       console.error('[real-comparaveis] categoria non-OK', urlCategoria, res.status)
       return []
@@ -923,13 +1248,26 @@ async function extrairCandidatosDeCategoria(urlCategoria: string, site: string, 
     // 1ª fonte, PRIORITÁRIA: dado estruturado JSON-LD (ver extrairListingsJsonLd) — url direta
     // e definitiva do anúncio + descrição que quase sempre já traz preço/área, presente no HTML
     // estático independente de o card visual da listagem ser montado via JavaScript.
-    for (const { url, description } of extrairListingsJsonLd(html)) {
+    //
+    // BUG real encontrado e corrigido: esta função costumava prepender `ruaReferencia` (a rua do
+    // PRÓPRIO avaliando) ao texto sempre que o anúncio não citava rua nenhuma — pensado como
+    // fallback pra não descartar o candidato. Mas isso rodava ANTES da classificação de precisão
+    // (extrairEnderecoComPrecisao, dentro de extrairCandidato), então fazia TODO candidato sem
+    // rua própria (a maioria, em bairro de condomínio fechado — ver CONDOMINIO_RE) ser
+    // erroneamente classificado como precisão 'exato' usando o ENDEREÇO DO AVALIANDO, nunca o
+    // endereço/condomínio real do anúncio. Confirmado via teste real: 8 amostras de condomínios
+    // DIFERENTES (São Paulo II, Bosque do Vianna, Jardim da Glória...) todas rotuladas com o
+    // mesmo endereço "Estrada Velha de Sorocaba, 500" (do avaliando) e a MESMA distância (914m,
+    // na prática a distância do avaliando até ele mesmo). O fallback certo já existe em
+    // extrairEnderecoComPrecisao (condomínio, depois bairro) — não precisa (e não deve) injetar
+    // a rua do avaliando no texto do candidato. Quando o próprio JSON-LD publica a RUA REAL do
+    // anúncio (`streetAddress`), usa ela direto (via `ruaConhecida` em extrairCandidato) — dado
+    // estruturado do portal, não uma adivinhação.
+    for (const { url, description, streetAddress } of extrairListingsJsonLd(html)) {
       if (candidatos.length >= MAX_CANDIDATOS_POR_CATEGORIA) break
       if (vistos.has(url)) continue
       vistos.add(url)
-      let texto = description
-      if (!ENDERECO_BASE_RE.test(texto)) texto = `${ruaReferencia} ${texto}`
-      const candidato = extrairCandidato(texto, url, bairro)
+      const candidato = extrairCandidato(description, url, bairro, streetAddress)
       if (candidato) candidatos.push(candidato)
     }
     console.error('[real-comparaveis] categoria', urlCategoria, ': JSON-LD deu', candidatos.length, 'candidato(s)')
@@ -959,14 +1297,11 @@ async function extrairCandidatosDeCategoria(urlCategoria: string, site: string, 
       // a janela maior capturar do card vizinho.
       const inicio = Math.max(0, match.index - 2_000)
       const fim = Math.min(html.length, match.index + match[0].length + 800)
-      let janela = removerHtml(html.slice(inicio, fim))
-      // BUG real encontrado e corrigido: testado manualmente contra uma página de categoria
-      // real — só ~40% dos cards repetem o nome da rua no texto (o resto só diz "bairro,
-      // cidade"), então a maioria era descartada por falta de endereço reconhecível. Como a
-      // página INTEIRA já é filtrada por essa rua (é a rua que usamos pra encontrá-la), usa a
-      // rua de referência como fallback só quando o texto do card não menciona nenhuma —
-      // nunca sobrescreve uma rua que o card já mencionou explicitamente.
-      if (!ENDERECO_BASE_RE.test(janela)) janela = `${ruaReferencia} ${janela}`
+      const janela = removerHtml(html.slice(inicio, fim))
+      // Não injeta mais `ruaReferencia` (rua do avaliando) quando o card não cita rua própria —
+      // ver o mesmo bug corrigido acima, na extração via JSON-LD: isso classificava o candidato
+      // como precisão 'exato' com o ENDEREÇO DO AVALIANDO em vez de deixar
+      // extrairEnderecoComPrecisao cair corretamente pra 'condominio' ou 'bairro'.
       const candidato = extrairCandidato(janela, url, bairro)
       if (candidato) candidatos.push(candidato)
     }
@@ -1074,26 +1409,68 @@ async function buscarComparaveisReaisSemLimite(params: BuscarParams, budgetMs: n
       }
     }
     if (alvos.length === 0) return []
-    const rua = ruaDoEnderecoCompleto(enderecoCompleto)
-    const resultados = await Promise.all(alvos.map(({ url, site }) => extrairCandidatosDeCategoria(url, site, rua, bairro)))
+    const resultados = await Promise.all(alvos.map(({ url, site }) => extrairCandidatosDeCategoria(url, site, bairro)))
     return resultados.flat()
   }
 
   async function umaRodada(_rodadaIndex: number, fetchTimeoutMs: number): Promise<CandidatoBruto[]> {
     if (buscarPorPortais) {
-      const porPortal = await Promise.all(
-        PORTAIS.map(async (site) => {
-          const { candidatos, categorias } = await buscarCandidatos(
-            montarPrompt(site, maxPorPortal, tipoImovel, bairro, cidade, uf),
-            maxPorPortal,
-            fetchTimeoutMs,
-            bairro,
-          )
-          return { site, candidatos, categorias }
-        }),
-      )
+      // Só na 1ª rodada: tenta as URLs de catálogo previstas (ver montarUrlCategoriaVivaRealPrevista
+      // e montarUrlCategoriaImovelwebPrevista) EM PARALELO com o grounding por portal, em vez de
+      // esperar o grounding "descobrir" esses mesmos links (o que pode levar 1-2 rodadas inteiras
+      // pra tipos de baixa densidade) — nunca bloqueia nem atrasa o restante da rodada.
+      // BUG real encontrado e corrigido: as duas URLs previstas do VivaReal (bairro e rua)
+      // miram o MESMO domínio — mesmo serializadas (ver comLimiteDominio) e nunca sobrepondo,
+      // testado ao vivo que disparar as duas na MESMA rodada ainda deixa pouco tempo de
+      // orçamento pra geocodificar (cada uma soma seu próprio respiro mínimo de 3s). Espalha
+      // uma em cada rodada em vez de tentar as duas de uma vez — rua na 1ª (mais específica,
+      // prioridade maior), bairro na 2ª (fallback) — cada rodada só toca vivareal.com.br uma
+      // vez, sobrando bem mais tempo real pra geocodificação.
+      const ruaAvaliando = _rodadaIndex === 1 ? (enderecoCompleto.split(',')[0] || '').trim() : ''
+      const urlVivaRealPrevista = _rodadaIndex === 2 ? montarUrlCategoriaVivaRealPrevista(tipoImovel, bairro, cidade, uf) : null
+      const urlVivaRealRuaPrevista =
+        _rodadaIndex === 1 ? montarUrlCategoriaVivaRealRuaPrevista(tipoImovel, ruaAvaliando, bairro, cidade, uf) : null
+      const urlImovelwebPrevista = _rodadaIndex === 1 ? montarUrlCategoriaImovelwebPrevista(tipoImovel, ruaAvaliando, bairro, cidade) : null
+      const urlZapPrevista = _rodadaIndex === 1 ? montarUrlCategoriaZapImoveisPrevista(tipoImovel, bairro, cidade, uf) : null
+      if (urlVivaRealPrevista) categoriasJaBuscadas.add(urlVivaRealPrevista)
+      if (urlVivaRealRuaPrevista) categoriasJaBuscadas.add(urlVivaRealRuaPrevista)
+      if (urlImovelwebPrevista) categoriasJaBuscadas.add(urlImovelwebPrevista)
+      if (urlZapPrevista) categoriasJaBuscadas.add(urlZapPrevista)
+      const [porPortal, daVivaRealPrevista, daVivaRealRuaPrevista, daImovelwebPrevista, daZapPrevista] = await Promise.all([
+        Promise.all(
+          PORTAIS.map(async (site) => {
+            const { candidatos, categorias } = await buscarCandidatos(
+              montarPrompt(site, maxPorPortal, tipoImovel, bairro, cidade, uf),
+              maxPorPortal,
+              fetchTimeoutMs,
+              bairro,
+            )
+            return { site, candidatos, categorias }
+          }),
+        ),
+        urlVivaRealPrevista ? extrairCandidatosDeCategoria(urlVivaRealPrevista, 'vivareal.com.br', bairro) : Promise.resolve([]),
+        urlVivaRealRuaPrevista ? extrairCandidatosDeCategoria(urlVivaRealRuaPrevista, 'vivareal.com.br', bairro) : Promise.resolve([]),
+        urlImovelwebPrevista ? extrairCandidatosDeCategoria(urlImovelwebPrevista, 'imovelweb.com.br', bairro) : Promise.resolve([]),
+        urlZapPrevista ? extrairCandidatosDeCategoria(urlZapPrevista, 'zapimoveis.com.br', bairro) : Promise.resolve([]),
+      ])
       const daCategoria = await buscarDeCategoriasNovas(porPortal.map(({ site, categorias }) => ({ site, categorias })))
-      return [...porPortal.flatMap((p) => p.candidatos), ...daCategoria]
+      // BUG real encontrado e corrigido: a ordem aqui decide quem entra primeiro na fila de
+      // geocodificação (ver geocodarEFiltrar — processa em ORDEM DO ARRAY, serial, 1 req/s no
+      // Nominatim, e corta assim que o prazo estoura). As páginas de catálogo filtradas pela RUA
+      // DO AVALIANDO (VivaReal e Imovelweb) são a fonte mais provável de trazer candidatos
+      // genuinamente PRÓXIMOS — mas vinham DEPOIS dos 40 candidatos genéricos do bairro inteiro, e
+      // um teste real confirmou: 28 candidatos reais de uma página filtrada foram achados, mas
+      // nenhum sobreviveu — o prazo estourou verificando os do bairro primeiro. Rua específica >
+      // bairro inteiro (VivaReal e ZapImóveis, mesmo nível de prioridade) > achado individual por
+      // grounding > categoria descoberta por acaso, nessa ordem de prioridade.
+      return [
+        ...daImovelwebPrevista,
+        ...daVivaRealRuaPrevista,
+        ...daVivaRealPrevista,
+        ...daZapPrevista,
+        ...porPortal.flatMap((p) => p.candidatos),
+        ...daCategoria,
+      ]
     }
     if (geminiConfigurado) {
       const { candidatos } = await buscarCandidatos(montarPrompt(null, max, tipoImovel, bairro, cidade, uf), max, fetchTimeoutMs, bairro)
@@ -1106,7 +1483,18 @@ async function buscarComparaveisReaisSemLimite(params: BuscarParams, budgetMs: n
   // que o orçamento total pra caber várias rodadas. Sem orçamento generoso (fallback apertado
   // em analyze.ts/avm.ts), só há UMA rodada, então ela pode usar quase todo o orçamento
   // disponível.
-  const fetchTimeoutMs = buscarPorPortais ? 7_000 : Math.max(2_000, Math.min(budgetMs - 2_000, 18_000))
+  // BUG real encontrado e corrigido — pedido explícito do usuário ("tem que dar certo"):
+  // confirmado via log real de produção que a busca por portal individual (Gemini) contribui
+  // ~0 candidatos diretos na prática (o texto que ela cita quase sempre vem de sites fora dos 5
+  // portais permitidos, então é descartado — ver "rejeitado-por-filtro" nos logs). Mesmo assim,
+  // ela compartilha o MESMO Promise.all das URLs de catálogo previstas (ver umaRodada) — como
+  // Promise.all só resolve quando TODOS terminam, um timeout de 7s aqui (maior que os 6s do
+  // fetch de categoria) podia sozinho ser o fator mais lento da rodada inteira mesmo
+  // contribuindo nada, roubando tempo real que sobraria pra geocodificar os candidatos de
+  // verdade (confirmado: 110 candidatos reais achados, só 6 verificados antes do prazo
+  // estourar). 4s é suficiente pro caso comum (resposta do Gemini geralmente volta bem antes
+  // disso) sem deixar esse ramo de baixo valor segurar a rodada.
+  const fetchTimeoutMs = buscarPorPortais ? 4_000 : Math.max(2_000, Math.min(budgetMs - 2_000, 18_000))
   const [origem, primeiraRodada] = await Promise.all([
     params.origemCoords ? Promise.resolve(params.origemCoords) : geocodeEndereco(enderecoCompleto),
     umaRodada(1, fetchTimeoutMs),

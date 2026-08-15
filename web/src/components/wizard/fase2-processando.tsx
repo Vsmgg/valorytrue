@@ -206,6 +206,13 @@ export function Fase2Processando({ input, onComplete }: Fase2Props) {
             }
           }
         }
+        // BUG real encontrado e corrigido: cada lote é uma chamada de IA independente, e a IA
+        // numera "id" (A01, A02...) sempre a partir de 1 dentro do próprio lote — juntando 2+
+        // lotes, os ids se repetem (ex.: A01 e A02 aparecem duas vezes cada, com amostras
+        // diferentes). Renumera aqui, depois de juntar todos os lotes, em vez de confiar na
+        // numeração da IA — é puramente sequencial, não precisa de IA nenhuma pra acertar.
+        amostrasProntas = amostrasProntas.map((a, i) => ({ ...a, id: `A${String(i + 1).padStart(2, '0')}` }))
+
         // Só manda "amostrasProntas" se pelo menos 1 lote funcionou (ou se não havia
         // comparáveis pra processar) — se TODOS os lotes falharam apesar de haver comparáveis
         // reais, é melhor deixar /api/analyze cair no caminho antigo (gerar amostras ele

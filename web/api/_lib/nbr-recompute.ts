@@ -143,11 +143,27 @@ export function recalcularResultadoNBR(resultado: Record<string, unknown>, semFo
     // amostras, não ser um número à parte que só coincide por acaso.
     const vfAntes = resultado.valorFinal as { areaAvalianda?: number; justificativaAdocao?: string } | undefined
     const areaAvalianda = Number(vfAntes?.areaAvalianda) || 0
+    const gp = resultado.grauPrecisao as { estimativaPontual: number; limiteInferior: number; limiteSuperior: number } | undefined
     if (areaAvalianda > 0 && tratamentoEstatistico.media > 0) {
       const valorUnitario = Math.round(tratamentoEstatistico.media * 100) / 100
       const valorTotal = Math.round(valorUnitario * areaAvalianda * 100) / 100
-      const faixaMin = Math.round(tratamentoEstatistico.minimo * areaAvalianda * 100) / 100
-      const faixaMax = Math.round(tratamentoEstatistico.maximo * areaAvalianda * 100) / 100
+
+      // BUG real encontrado e corrigido — pedido explícito do usuário ("o valor final tá muito
+      // grande, muito amplo, a pessoa não vai saber quanto vale realmente"): o intervalo usava
+      // o MÍNIMO e MÁXIMO brutos das amostras — com poucas amostras (4 a 10) e imóveis
+      // naturalmente heterogêneos, isso produzia faixas de quase o dobro (ex.: R$ 397 mil a
+      // R$ 896 mil), mesmo quando a MÉDIA em si era bem estável. Min/máx mede a dispersão ENTRE
+      // as amostras, não a precisão da MÉDIA adotada — são coisas diferentes. O intervalo correto
+      // pra reportar confiança no valor adotado é o erro-padrão da média (desvio / raiz de n),
+      // que fica mais estreito quanto mais amostras entram — a mesma lógica estatística por trás
+      // do "quanto maior a amostra, mais preciso o valor". Aproximação normal de ~80% de
+      // confiança (z≈1,28), coerente com o piso técnico do método comparativo direto.
+      const n = tratamentoEstatistico.amostrasUtilizadas
+      const desvioPadrao = (tratamentoEstatistico.coeficienteVariacao / 100) * tratamentoEstatistico.media
+      const erroPadraoMedia = n > 0 ? desvioPadrao / Math.sqrt(n) : 0
+      const margemUnitaria = 1.28 * erroPadraoMedia
+      const faixaMin = Math.round(Math.max(0, valorUnitario - margemUnitaria) * areaAvalianda * 100) / 100
+      const faixaMax = Math.round((valorUnitario + margemUnitaria) * areaAvalianda * 100) / 100
 
       resultado.valorFinal = {
         ...vfAntes,
@@ -164,21 +180,11 @@ export function recalcularResultadoNBR(resultado: Record<string, unknown>, semFo
 
       const parecerAntes = resultado.parecer as Record<string, unknown> | undefined
       resultado.parecer = { ...parecerAntes, valorMercado: valorTotal, faixaMin, faixaMax }
-    }
 
-    const gp = resultado.grauPrecisao as { estimativaPontual: number; limiteInferior: number; limiteSuperior: number } | undefined
-    const parecerAtual = resultado.parecer as { valorMercado?: number } | undefined
-    if (gp && parecerAtual?.valorMercado) {
-      // Reancora o intervalo de confiança no valor corrigido, preservando a largura
-      // relativa (%) que a IA já tinha avaliado como plausível para a dispersão das
-      // amostras — só o ponto central muda, não o quanto de incerteza foi estimado.
-      const fatorInf = gp.estimativaPontual > 0 ? gp.limiteInferior / gp.estimativaPontual : 0.9
-      const fatorSup = gp.estimativaPontual > 0 ? gp.limiteSuperior / gp.estimativaPontual : 1.1
-      resultado.grauPrecisao = classificarGrauPrecisao(
-        parecerAtual.valorMercado,
-        parecerAtual.valorMercado * fatorInf,
-        parecerAtual.valorMercado * fatorSup,
-      )
+      // O grau de precisão também passa a vir do MESMO intervalo estatístico determinístico
+      // acima, nunca mais da largura que a IA declarou livremente (podia ser bem mais larga ou
+      // mais estreita que a dispersão real das amostras, sem base numérica nenhuma).
+      if (gp) resultado.grauPrecisao = classificarGrauPrecisao(valorTotal, faixaMin, faixaMax)
     } else if (gp) {
       resultado.grauPrecisao = classificarGrauPrecisao(gp.estimativaPontual, gp.limiteInferior, gp.limiteSuperior)
     }
