@@ -70,12 +70,17 @@ export function AvmForm({ onSubmit, submitting }: { onSubmit: (result: AvmFormRe
     </label>
   )
 
+  // Mesmo bug do módulo Empresa Avaliadora: terreno não tem "número" de imóvel construído nem
+  // área construída — o número (quando existe) é do lote, e o campo obrigatório de área é o
+  // do terreno.
+  const isTerreno = data.tipoImovel === 'Terreno'
+
   const canSubmit =
     data.cep.replace(/\D/g, '').length === 8 &&
     data.logradouro.trim() &&
-    data.numero.trim() &&
+    (isTerreno || data.numero.trim()) &&
     data.cidade.trim() &&
-    data.areaConstruida.trim() &&
+    (isTerreno ? data.areaTerreno.trim() : data.areaConstruida.trim()) &&
     !submitting
 
   const handleSubmit = () => {
@@ -108,7 +113,7 @@ export function AvmForm({ onSubmit, submitting }: { onSubmit: (result: AvmFormRe
             {cepStatus === 'not-found' && <p className="mt-1 text-[11px] text-red-400">CEP não encontrado.</p>}
             {cepStatus === 'found' && <p className="mt-1 text-[11px] text-emerald-400">Endereço localizado automaticamente.</p>}
           </label>
-          {field('numero', 'Número', { placeholder: '250' })}
+          {field('numero', isTerreno ? 'Número do lote (opcional)' : 'Número', { placeholder: isTerreno ? 'Ex.: Lote 12, Quadra 4' : '250' })}
           {field('logradouro', 'Logradouro', { placeholder: 'Preenchido pelo CEP' })}
           {field('complemento', 'Complemento', { placeholder: 'Opcional' })}
           {field('bairro', 'Bairro', { placeholder: 'Preenchido pelo CEP' })}
@@ -140,11 +145,11 @@ export function AvmForm({ onSubmit, submitting }: { onSubmit: (result: AvmFormRe
               ))}
             </select>
           </label>
-          {field('areaConstruida', 'Área construída (m²)', { placeholder: '75', inputMode: 'decimal' })}
-          {field('areaTerreno', 'Área do terreno (m²)', { placeholder: 'opcional', inputMode: 'decimal' })}
-          {field('dormitorios', 'Dormitórios', { placeholder: '2', inputMode: 'numeric' })}
-          {field('banheiros', 'Banheiros', { placeholder: '1', inputMode: 'numeric' })}
-          {field('vagas', 'Vagas de garagem', { placeholder: '1', inputMode: 'numeric' })}
+          {!isTerreno && field('areaConstruida', 'Área construída (m²)', { placeholder: '75', inputMode: 'decimal' })}
+          {field('areaTerreno', 'Área do terreno (m²)', { placeholder: isTerreno ? '450' : 'opcional', inputMode: 'decimal' })}
+          {!isTerreno && field('dormitorios', 'Dormitórios', { placeholder: '2', inputMode: 'numeric' })}
+          {!isTerreno && field('banheiros', 'Banheiros', { placeholder: '1', inputMode: 'numeric' })}
+          {!isTerreno && field('vagas', 'Vagas de garagem', { placeholder: '1', inputMode: 'numeric' })}
           <div className="sm:col-span-2">
             <span className="text-[12px] font-medium text-muted">Observações (opcional)</span>
             <textarea

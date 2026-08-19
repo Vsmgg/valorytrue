@@ -87,6 +87,12 @@ export function Fase1Vistoriador({ onSubmit }: { onSubmit: (result: Fase1Result)
   )
 
   const isApartamento = data.tipoImovel === 'Apartamento' || data.tipoImovel === 'Sala/conjunto comercial'
+  // BUG real encontrado e corrigido — pedido explícito do usuário: um terreno/lote não tem
+  // "número" de imóvel construído nem "área construída"/dormitórios/banheiros/vagas — o
+  // formulário pedia tudo isso como obrigatório mesmo assim. Pra terreno, o número (quando
+  // existe) é o do LOTE, sempre opcional, e o campo obrigatório de área é o do TERRENO, não o
+  // construído.
+  const isTerreno = data.tipoImovel === 'Terreno/lote urbano'
   const dormCount = roomCount(data.dormitorios)
   const banhCount = roomCount(data.banheiros)
   const photoCategories = [
@@ -101,9 +107,9 @@ export function Fase1Vistoriador({ onSubmit }: { onSubmit: (result: Fase1Result)
   const canSubmit =
     data.cep.replace(/\D/g, '').length === 8 &&
     data.logradouro.trim() &&
-    data.numero.trim() &&
+    (isTerreno || data.numero.trim()) &&
     data.cidade.trim() &&
-    data.areaConstruida.trim() &&
+    (isTerreno ? data.areaTerreno.trim() : data.areaConstruida.trim()) &&
     !submitting
 
   const handleSubmit = () => {
@@ -143,7 +149,7 @@ export function Fase1Vistoriador({ onSubmit }: { onSubmit: (result: Fase1Result)
             {cepStatus === 'error' && <p className="mt-1 text-[11px] text-red-400">Não foi possível consultar o CEP agora.</p>}
             {cepStatus === 'found' && <p className="mt-1 text-[11px] text-emerald-400">Endereço localizado automaticamente.</p>}
           </label>
-          {field('numero', 'Número', { placeholder: '250' })}
+          {field('numero', isTerreno ? 'Número do lote (opcional)' : 'Número', { placeholder: isTerreno ? 'Ex.: Lote 12, Quadra 4' : '250' })}
           {field('logradouro', 'Logradouro (preenchido pelo CEP)', { placeholder: 'Rua / Avenida' })}
           {field('complemento', 'Complemento', { placeholder: 'Apto 12, bloco B (opcional)' })}
           {field('bairro', 'Bairro (preenchido pelo CEP)', { placeholder: 'Bairro' })}
@@ -193,17 +199,22 @@ export function Fase1Vistoriador({ onSubmit }: { onSubmit: (result: Fase1Result)
               ))}
             </select>
           </label>
-          {field('areaConstruida', isApartamento ? 'Área privativa (m²)' : 'Área construída (m²)', {
-            placeholder: '85',
-            inputMode: 'decimal',
-          })}
-          {field('areaTerreno', isApartamento ? 'Área construída total (com áreas comuns, opcional)' : 'Área do terreno (m²)', {
-            placeholder: isApartamento ? '110 (opcional)' : '120 (opcional)',
-            inputMode: 'decimal',
-          })}
-          {field('dormitorios', 'Dormitórios', { placeholder: '3', inputMode: 'numeric' })}
-          {field('banheiros', 'Banheiros', { placeholder: '2', inputMode: 'numeric' })}
-          {field('vagas', 'Vagas de garagem', { placeholder: '1', inputMode: 'numeric' })}
+          {!isTerreno &&
+            field('areaConstruida', isApartamento ? 'Área privativa (m²)' : 'Área construída (m²)', {
+              placeholder: '85',
+              inputMode: 'decimal',
+            })}
+          {field(
+            'areaTerreno',
+            isTerreno ? 'Área do terreno (m²)' : isApartamento ? 'Área construída total (com áreas comuns, opcional)' : 'Área do terreno (m²)',
+            {
+              placeholder: isTerreno ? '450' : isApartamento ? '110 (opcional)' : '120 (opcional)',
+              inputMode: 'decimal',
+            },
+          )}
+          {!isTerreno && field('dormitorios', 'Dormitórios', { placeholder: '3', inputMode: 'numeric' })}
+          {!isTerreno && field('banheiros', 'Banheiros', { placeholder: '2', inputMode: 'numeric' })}
+          {!isTerreno && field('vagas', 'Vagas de garagem', { placeholder: '1', inputMode: 'numeric' })}
         </div>
       </div>
 

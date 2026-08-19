@@ -589,9 +589,38 @@ function extrairSubregiaoDaUrlVivaReal(url: string, bairro: string): string | nu
   return palavras.map((p) => p.charAt(0).toUpperCase() + p.slice(1)).join(' ')
 }
 
-function extrairCandidato(textoBruto: string, url: string | undefined, bairro: string, ruaConhecida?: string): CandidatoBruto | null {
+// BUG real encontrado e corrigido — pedido explícito do usuário ("priorize esses 5 sites, mas
+// se não conseguir puxar nesses, puxe em outros sites independente do que ser"): a lista
+// fechada de 5 portais (pedida numa sessão anterior) descartava dezenas de anúncios reais e
+// verificáveis (preço, área, endereço, tudo presente no texto) só por não serem um dos 5,
+// mesmo em regiões onde os 5 genuinamente têm pouca cobertura (confirmado via log real: um
+// terreno numa região distinta não achou NENHUMA amostra apesar de o grounding citar vários
+// sites menores com dados completos). Continua priorizando os 5 (só eles valem na 1ª rodada —
+// ver `permitirQualquerSite` em umaRodada), mas quando isso não é suficiente, aceita qualquer
+// site desde que a URL pareça mesmo um anúncio de unidade individual: precisa de um ID
+// numérico de pelo menos 4 dígitos em algum lugar da URL (sinal forte de página de anúncio
+// específico — categorias/listagens raramente têm isso; confirmado via teste manual com URLs
+// reais rejeitadas nos logs desta sessão).
+const ID_ANUNCIO_GENERICO_RE = /\d{4,}/
+function pareceAnuncioIndividualDeQualquerSite(url: string): boolean {
+  try {
+    new URL(url)
+  } catch {
+    return false
+  }
+  return ID_ANUNCIO_GENERICO_RE.test(url)
+}
+
+function extrairCandidato(
+  textoBruto: string,
+  url: string | undefined,
+  bairro: string,
+  ruaConhecida?: string,
+  permitirQualquerSite = false,
+): CandidatoBruto | null {
   if (!url) return null
-  if (!urlPertenceAPortalConhecido(url)) return null
+  const ehPortalConhecido = urlPertenceAPortalConhecido(url)
+  if (!ehPortalConhecido && !(permitirQualquerSite && pareceAnuncioIndividualDeQualquerSite(url))) return null
   if (PAGINA_INSTITUCIONAL_RE.test(url)) return null
   if (ALUGUEL_URL_RE.test(url)) return null
   // Páginas de CATEGORIA/listagem (ex.: "zapimoveis.com.br/venda/apartamentos/sp+barueri++jd-
@@ -601,7 +630,9 @@ function extrairCandidato(textoBruto: string, url: string | undefined, bairro: s
   // mais confiável que "tem algum dígito" (uma página de categoria pode ter dígito também, ex.
   // um filtro de quartos embutido na slug — confirmado via teste real com
   // ".../2-quartos-ordem-precio-menor.html", uma listagem de 42 anúncios que passava despercebida).
-  if (!urlContemCaminhoDeAnuncio(url)) return null
+  // Esse caminho fixo só existe pros 5 portais conhecidos (ver CAMINHO_ANUNCIO_POR_PORTAL) — pra
+  // um site fora da lista, já validamos acima via `pareceAnuncioIndividualDeQualquerSite`.
+  if (ehPortalConhecido && !urlContemCaminhoDeAnuncio(url)) return null
   // BUG real encontrado e corrigido: o imovelweb anexa parâmetros de rastreio de onde o link foi
   // clicado na página de catálogo (ex. "?n_src=Listado&n_pills=Churrasqueira&n_pg=1&n_pos=8") —
   // o MESMO anúncio aparece com querystrings DIFERENTES dependendo de qual "pill"/posição da
@@ -727,7 +758,13 @@ async function resolverRedirecionamentoGemini(url: string): Promise<string> {
   return url
 }
 
-async function buscarCandidatos(prompt: string, max: number, fetchTimeoutMs: number, bairro: string): Promise<ResultadoBuscaPortal> {
+async function buscarCandidatos(
+  prompt: string,
+  max: number,
+  fetchTimeoutMs: number,
+  bairro: string,
+  permitirQualquerSite = false,
+): Promise<ResultadoBuscaPortal> {
   const apiKey = process.env.GEMINI_API_KEY
   if (!apiKey) return { candidatos: [], categorias: [] }
 
@@ -793,7 +830,7 @@ async function buscarCandidatos(prompt: string, max: number, fetchTimeoutMs: num
       // categoria/listagem em vez de um anúncio individual — em vez de só descartar, guarda a
       // URL à parte pra ser buscada direto depois (ver extrairCandidatosDeCategoria).
       if (chunkUrl && ehPaginaDeCategoria(chunkUrl) && !categorias.includes(chunkUrl)) categorias.push(chunkUrl)
-      const candidato = extrairCandidato(text, chunkUrl, bairro)
+      const candidato = extrairCandidato(text, chunkUrl, bairro, undefined, permitirQualquerSite)
       if (!candidato || seenUrls.has(candidato.url)) {
         if (!chunkUrl || chunkUrl.includes('vertexaisearch.cloud.google.com')) semUrlResolvida++
         else if (!candidato) {
@@ -1438,12 +1475,17 @@ async function buscarComparaveisReaisSemLimite(params: BuscarParams, budgetMs: n
       if (urlZapPrevista) categoriasJaBuscadas.add(urlZapPrevista)
       const [porPortal, daVivaRealPrevista, daVivaRealRuaPrevista, daImovelwebPrevista, daZapPrevista] = await Promise.all([
         Promise.all(
+          // BUG real encontrado e corrigido — pedido explícito do usuário: prioriza sempre os 5
+          // portais na 1ª rodada (comportamento já comprovado); só relaxa pra aceitar qualquer
+          // site real a partir da 2ª rodada em diante, que só acontece quando a 1ª não achou o
+          // suficiente — nunca abre mão dos 5 portais como primeira tentativa.
           PORTAIS.map(async (site) => {
             const { candidatos, categorias } = await buscarCandidatos(
               montarPrompt(site, maxPorPortal, tipoImovel, bairro, cidade, uf),
               maxPorPortal,
               fetchTimeoutMs,
               bairro,
+              _rodadaIndex > 1,
             )
             return { site, candidatos, categorias }
           }),
