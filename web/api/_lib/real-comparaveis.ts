@@ -551,6 +551,32 @@ function detectarTipo(textoBruto: string, url: string): string | null {
   return null
 }
 
+// BUG real encontrado e corrigido — pedido explícito do usuário ("prioriza os 5, mas puxa de
+// outros se precisar"): descoberto num teste real de terreno que o fallback "qualquer site" (ver
+// permitirQualquerSite) aceitava candidatos de tipo TOTALMENTE incompatível — apartamento, casa,
+// até chácara — como se fossem comparáveis de um TERRENO, porque `detectarTipo` sempre foi só
+// informativo (nunca um filtro, ver comentário de detectarTipo acima). A 1ª correção restringiu
+// esse filtro só ao fallback, supondo que a busca dirigida pelo tipo no prompt bastava pros 5
+// portais — mas um 2º teste real (mesmo terreno) mostrou 8 de 10 amostras finais como
+// Apartamento/Casa/Chácara vindas do zapimoveis.com.br, um dos 5 PORTAIS CONHECIDOS: o grounding
+// às vezes ignora o tipo pedido no prompt mesmo dentro de um portal confiável. O filtro agora vale
+// sempre (ver extrairCandidato), não só no fallback. Em ambos os casos, o resultado do bug era o
+// mesmo: analyze-verify corretamente descartava as amostras por "tipologia incompatível" na
+// passada seguinte, desperdiçando vagas de amostra que nunca iam sobreviver à auditoria mesmo
+// assim. Positivo por padrão (tipo não detectado = aceita) pra não perder candidatos reais só por
+// o texto não deixar claro o tipo.
+const RESIDENCIAL_CONSTRUIDO = new Set(['Apartamento', 'Sobrado', 'Casa em condomínio', 'Casa'])
+function tipoCompativel(tipoAvaliando: string | undefined, tipoDetectado: string | null): boolean {
+  if (!tipoAvaliando || !tipoDetectado) return true
+  const ehTerrenoAvaliando = /terreno|lote/i.test(tipoAvaliando)
+  if (ehTerrenoAvaliando) return !RESIDENCIAL_CONSTRUIDO.has(tipoDetectado)
+  const ehApartamentoAvaliando = /apartamento/i.test(tipoAvaliando)
+  if (ehApartamentoAvaliando) return tipoDetectado !== 'Terreno/lote'
+  const ehCasaOuSobradoAvaliando = /\bcasa\b|sobrado/i.test(tipoAvaliando)
+  if (ehCasaOuSobradoAvaliando) return tipoDetectado !== 'Terreno/lote' && tipoDetectado !== 'Apartamento'
+  return true
+}
+
 // BUG real encontrado e corrigido — pedido explícito do usuário ("as amostras agora estejam
 // corretas... estes erros não podem acontecer jamais"): quando o VivaReal serve a versão
 // reduzida da página (sem "address.streetAddress" — confirmado que acontece sob defesa
@@ -617,6 +643,7 @@ function extrairCandidato(
   bairro: string,
   ruaConhecida?: string,
   permitirQualquerSite = false,
+  tipoAvaliando?: string,
 ): CandidatoBruto | null {
   if (!url) return null
   const ehPortalConhecido = urlPertenceAPortalConhecido(url)
@@ -675,13 +702,21 @@ function extrairCandidato(
   }
   if (!enderecoInfo) return null
 
+  const tipoDetectado = detectarTipo(text, urlLimpa)
+  // BUG real encontrado e corrigido: este filtro só rodava quando permitirQualquerSite (fallback
+  // pra sites fora dos 5 conhecidos) estava ativo — mas um teste real (terreno em Serra Negra/SP)
+  // mostrou 8 de 10 amostras finais como Apartamento/Casa/Chácara vindas do zapimoveis.com.br, um
+  // dos 5 PORTAIS CONHECIDOS: o grounding às vezes retorna anúncio de tipo errado mesmo dentro de
+  // um portal confiável, então a checagem de tipo precisa valer sempre, não só no fallback.
+  if (!tipoCompativel(tipoAvaliando, tipoDetectado)) return null
+
   return {
     endereco: enderecoInfo.endereco,
     precisaoEndereco: enderecoInfo.precisao,
     areaM2,
     valorAnunciado,
     url: urlLimpa,
-    tipoDetectado: detectarTipo(text, urlLimpa),
+    tipoDetectado,
   }
 }
 
@@ -764,6 +799,7 @@ async function buscarCandidatos(
   fetchTimeoutMs: number,
   bairro: string,
   permitirQualquerSite = false,
+  tipoAvaliando?: string,
 ): Promise<ResultadoBuscaPortal> {
   const apiKey = process.env.GEMINI_API_KEY
   if (!apiKey) return { candidatos: [], categorias: [] }
@@ -830,7 +866,7 @@ async function buscarCandidatos(
       // categoria/listagem em vez de um anúncio individual — em vez de só descartar, guarda a
       // URL à parte pra ser buscada direto depois (ver extrairCandidatosDeCategoria).
       if (chunkUrl && ehPaginaDeCategoria(chunkUrl) && !categorias.includes(chunkUrl)) categorias.push(chunkUrl)
-      const candidato = extrairCandidato(text, chunkUrl, bairro, undefined, permitirQualquerSite)
+      const candidato = extrairCandidato(text, chunkUrl, bairro, undefined, permitirQualquerSite, tipoAvaliando)
       if (!candidato || seenUrls.has(candidato.url)) {
         if (!chunkUrl || chunkUrl.includes('vertexaisearch.cloud.google.com')) semUrlResolvida++
         else if (!candidato) {
@@ -1265,7 +1301,12 @@ function extrairListingsJsonLd(html: string): ListingJsonLd[] {
  * regras de qualidade do resto do pipeline (extrairCandidato) — nunca aceita um candidato sem
  * preço real extraído do próprio texto.
  */
-async function extrairCandidatosDeCategoria(urlCategoria: string, site: string, bairro: string): Promise<CandidatoBruto[]> {
+async function extrairCandidatosDeCategoria(
+  urlCategoria: string,
+  site: string,
+  bairro: string,
+  tipoAvaliando?: string,
+): Promise<CandidatoBruto[]> {
   const caminhoAnuncio = CAMINHO_ANUNCIO_POR_PORTAL[site]
   if (!caminhoAnuncio) return []
   try {
@@ -1304,7 +1345,7 @@ async function extrairCandidatosDeCategoria(urlCategoria: string, site: string, 
       if (candidatos.length >= MAX_CANDIDATOS_POR_CATEGORIA) break
       if (vistos.has(url)) continue
       vistos.add(url)
-      const candidato = extrairCandidato(description, url, bairro, streetAddress)
+      const candidato = extrairCandidato(description, url, bairro, streetAddress, false, tipoAvaliando)
       if (candidato) candidatos.push(candidato)
     }
     console.error('[real-comparaveis] categoria', urlCategoria, ': JSON-LD deu', candidatos.length, 'candidato(s)')
@@ -1339,7 +1380,7 @@ async function extrairCandidatosDeCategoria(urlCategoria: string, site: string, 
       // ver o mesmo bug corrigido acima, na extração via JSON-LD: isso classificava o candidato
       // como precisão 'exato' com o ENDEREÇO DO AVALIANDO em vez de deixar
       // extrairEnderecoComPrecisao cair corretamente pra 'condominio' ou 'bairro'.
-      const candidato = extrairCandidato(janela, url, bairro)
+      const candidato = extrairCandidato(janela, url, bairro, undefined, false, tipoAvaliando)
       if (candidato) candidatos.push(candidato)
     }
     console.error('[real-comparaveis] categoria', urlCategoria, ': total', candidatos.length, 'candidatos do HTML (JSON-LD + href)')
@@ -1446,7 +1487,7 @@ async function buscarComparaveisReaisSemLimite(params: BuscarParams, budgetMs: n
       }
     }
     if (alvos.length === 0) return []
-    const resultados = await Promise.all(alvos.map(({ url, site }) => extrairCandidatosDeCategoria(url, site, bairro)))
+    const resultados = await Promise.all(alvos.map(({ url, site }) => extrairCandidatosDeCategoria(url, site, bairro, tipoImovel)))
     return resultados.flat()
   }
 
@@ -1486,14 +1527,15 @@ async function buscarComparaveisReaisSemLimite(params: BuscarParams, budgetMs: n
               fetchTimeoutMs,
               bairro,
               _rodadaIndex > 1,
+              tipoImovel,
             )
             return { site, candidatos, categorias }
           }),
         ),
-        urlVivaRealPrevista ? extrairCandidatosDeCategoria(urlVivaRealPrevista, 'vivareal.com.br', bairro) : Promise.resolve([]),
-        urlVivaRealRuaPrevista ? extrairCandidatosDeCategoria(urlVivaRealRuaPrevista, 'vivareal.com.br', bairro) : Promise.resolve([]),
-        urlImovelwebPrevista ? extrairCandidatosDeCategoria(urlImovelwebPrevista, 'imovelweb.com.br', bairro) : Promise.resolve([]),
-        urlZapPrevista ? extrairCandidatosDeCategoria(urlZapPrevista, 'zapimoveis.com.br', bairro) : Promise.resolve([]),
+        urlVivaRealPrevista ? extrairCandidatosDeCategoria(urlVivaRealPrevista, 'vivareal.com.br', bairro, tipoImovel) : Promise.resolve([]),
+        urlVivaRealRuaPrevista ? extrairCandidatosDeCategoria(urlVivaRealRuaPrevista, 'vivareal.com.br', bairro, tipoImovel) : Promise.resolve([]),
+        urlImovelwebPrevista ? extrairCandidatosDeCategoria(urlImovelwebPrevista, 'imovelweb.com.br', bairro, tipoImovel) : Promise.resolve([]),
+        urlZapPrevista ? extrairCandidatosDeCategoria(urlZapPrevista, 'zapimoveis.com.br', bairro, tipoImovel) : Promise.resolve([]),
       ])
       const daCategoria = await buscarDeCategoriasNovas(porPortal.map(({ site, categorias }) => ({ site, categorias })))
       // BUG real encontrado e corrigido: a ordem aqui decide quem entra primeiro na fila de

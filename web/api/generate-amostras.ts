@@ -3,9 +3,17 @@ import { nbrResponseSchema } from './_lib/nbr-schema.js'
 import { sanitizarUrlsAmostras, type AmostraIA } from './_lib/nbr-recompute.js'
 import type { ComparavelReal } from './_lib/real-comparaveis.js'
 
-// Revertido — ver o motivo completo no config de analyze-verify.ts: trocar pra função Node.js
-// normal quebrou getUserFromRequest inteiro ("request.headers.get is not a function").
-export const config = { runtime: 'edge' }
+// BUG real encontrado e corrigido — mesma causa e mesma correção de api/find-amostras.ts: uma
+// tentativa anterior de sair do Edge Function (25s fixos) só removendo `runtime: 'edge'` e
+// mantendo o formato antigo de export quebrou getUserFromRequest ("request.headers.get is not
+// a function"), porque a Vercel dá um objeto de requisição estilo Node.js legado pra esse
+// formato quando não é Edge. A correção certa: formato "Web Handler" (`export default {
+// fetch }`), que garante um Request/Response padrão da Web mesmo em runtime Node.js — testado e
+// confirmado em produção sem quebrar nada. Confirmado via teste real que esse endpoint
+// especificamente estourava o limite Edge processando um lote de 8 comparáveis (502 "Não foi
+// possível conectar à API do Gemini", 2 tentativas seguidas), perdendo 8 amostras reais de uma
+// vez só por falta de tempo.
+export const config = { maxDuration: 60 }
 
 interface PropertyData {
   logradouro: string
@@ -42,7 +50,11 @@ const amostraSchema = (nbrResponseSchema.properties.amostras as { items: unknown
  * VEZ (uma por lote de comparáveis), cada chamada uma invocação nova do Edge Function com seu
  * próprio limite de 25s, até cobrir todos os comparáveis encontrados.
  */
-export default async function handler(request: Request) {
+export default {
+  fetch: handler,
+}
+
+async function handler(request: Request): Promise<Response> {
   if (request.method !== 'POST') {
     return json({ error: 'Método não permitido.' }, 405)
   }
@@ -129,8 +141,11 @@ Gere o array "amostras" com uma entrada para cada um dos ${comparaveisReais.leng
           responseSchema,
         },
       }),
-      // Revertido pra 23s — voltou a ser Edge Function (ver comentário no config acima).
-      signal: AbortSignal.timeout(23_000),
+      // Agora função Node.js com até 60s (ver `config` acima) — 55s deixa margem de 5s pro
+      // resto do handler (parse da resposta, sanitização) sem cortar a chamada ao Gemini bem no
+      // meio, que era exatamente o que causava os 502 "Não foi possível conectar à API do
+      // Gemini" num lote de 8 comparáveis.
+      signal: AbortSignal.timeout(55_000),
     })
 
     const data = (await geminiRes.json()) as {
